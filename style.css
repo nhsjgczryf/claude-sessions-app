@@ -64,13 +64,49 @@ input[type=text]:focus { border-color: var(--accent); }
 /* =========================================== Sidebar */
 #sidebar {
   width: 260px;
+  min-width: 180px;
+  max-width: 500px;
   flex-shrink: 0;
   background: var(--bg2);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.18s ease, min-width 0.18s ease;
 }
+#sidebar.resizing {
+  transition: none;
+}
+#sidebar.collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  border-right: none;
+}
+#sidebar.collapsed > * { display: none; }
+
+#sidebar-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--border);
+  transition: background 0.15s;
+  position: relative;
+}
+#sidebar-resizer:hover,
+#sidebar-resizer.dragging { background: var(--accent); }
+#sidebar-resizer.hidden { display: none; }
+
+/* Floating expand button shown when sidebar is collapsed */
+.icon-btn.floating {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+}
+.icon-btn.floating.hidden { display: none; }
 
 #sidebar-header {
   padding: 10px 12px;
@@ -80,10 +116,34 @@ input[type=text]:focus { border-color: var(--accent); }
   gap: 8px;
 }
 
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
 .sidebar-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  line-height: 1;
+}
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+  border-color: var(--border);
 }
 
 .sidebar-actions {
@@ -219,6 +279,9 @@ input[type=text]:focus { border-color: var(--accent); }
   margin-bottom: -1px;
 }
 .tab:hover:not(.active) { background: var(--bg-hover); color: var(--fg); }
+.tab.dragging { opacity: 0.4; }
+.tab.drop-before { box-shadow: -2px 0 0 0 var(--accent); }
+.tab.drop-after  { box-shadow:  2px 0 0 0 var(--accent); }
 
 .tab-status {
   width: 8px;

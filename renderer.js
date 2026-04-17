@@ -411,6 +411,8 @@ function renderTabs() {
   for (const t of tabs) {
     const div = document.createElement('div');
     div.className = 'tab' + (t.id === activeTabId ? ' active' : '') + (t.alive ? '' : ' dead');
+    div.draggable = true;
+    div.dataset.tabId = t.id;
     div.innerHTML = `
       <span class="tab-status"></span>
       <span class="tab-name">${escapeHtml(t.sessionName)}</span>
@@ -426,8 +428,69 @@ function renderTabs() {
     div.addEventListener('auxclick', (e) => {
       if (e.button === 1) closeTab(t.id);
     });
+    attachTabDragHandlers(div, t.id);
     el.appendChild(div);
   }
+}
+
+// ============================================================================
+// Tab drag-and-drop reordering
+// ============================================================================
+
+let draggingTabId = null;
+
+function attachTabDragHandlers(el, tabId) {
+  el.addEventListener('dragstart', (e) => {
+    draggingTabId = tabId;
+    el.classList.add('dragging');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', tabId);
+    } catch (_) {}
+  });
+
+  el.addEventListener('dragend', () => {
+    draggingTabId = null;
+    document.querySelectorAll('.tab').forEach((t) => {
+      t.classList.remove('dragging', 'drop-before', 'drop-after');
+    });
+  });
+
+  el.addEventListener('dragover', (e) => {
+    if (!draggingTabId || draggingTabId === tabId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = el.getBoundingClientRect();
+    const before = e.clientX < rect.left + rect.width / 2;
+    el.classList.toggle('drop-before', before);
+    el.classList.toggle('drop-after', !before);
+  });
+
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drop-before', 'drop-after');
+  });
+
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const fromId = draggingTabId;
+    const toId = tabId;
+    el.classList.remove('drop-before', 'drop-after');
+    if (!fromId || fromId === toId) return;
+
+    const rect = el.getBoundingClientRect();
+    const before = e.clientX < rect.left + rect.width / 2;
+
+    const fromIdx = tabs.findIndex((t) => t.id === fromId);
+    const toIdxRaw = tabs.findIndex((t) => t.id === toId);
+    if (fromIdx < 0 || toIdxRaw < 0) return;
+
+    const [moved] = tabs.splice(fromIdx, 1);
+    let toIdx = tabs.findIndex((t) => t.id === toId);
+    if (!before) toIdx += 1;
+    tabs.splice(toIdx, 0, moved);
+
+    renderTabs();
+  });
 }
 
 // ============================================================================
@@ -624,6 +687,89 @@ $('#modal-overlay').addEventListener('click', (e) => {
 document.querySelectorAll('#editor-form input[name="type"]').forEach((el) => {
   el.addEventListener('change', updateTypeVisibility);
 });
+
+// ============================================================================
+// Sidebar: resize + collapse (persisted to localStorage)
+// ============================================================================
+
+const LS_WIDTH = 'claude-sessions.sidebarWidth';
+const LS_COLLAPSED = 'claude-sessions.sidebarCollapsed';
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 500;
+const SIDEBAR_DEFAULT = 260;
+
+function setSidebarWidth(px) {
+  const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, px | 0));
+  $('#sidebar').style.width = clamped + 'px';
+  try { localStorage.setItem(LS_WIDTH, String(clamped)); } catch (_) {}
+  refitActiveTerminal();
+}
+
+function setSidebarCollapsed(collapsed) {
+  $('#sidebar').classList.toggle('collapsed', !!collapsed);
+  $('#sidebar-resizer').classList.toggle('hidden', !!collapsed);
+  $('#btn-expand').classList.toggle('hidden', !collapsed);
+  try { localStorage.setItem(LS_COLLAPSED, collapsed ? '1' : '0'); } catch (_) {}
+  // Wait for width transition before refitting
+  setTimeout(refitActiveTerminal, 220);
+}
+
+function refitActiveTerminal() {
+  const tab = tabs.find((t) => t.id === activeTabId);
+  if (!tab) return;
+  try {
+    tab.fitAddon.fit();
+    const { cols, rows } = tab.term;
+    if (tab.alive) ipcRenderer.send('terminal-resize', tab.id, cols, rows);
+  } catch (_) {}
+}
+
+// Restore persisted state
+try {
+  const savedWidth = parseInt(localStorage.getItem(LS_WIDTH), 10);
+  if (Number.isFinite(savedWidth)) {
+    $('#sidebar').style.width =
+      Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, savedWidth)) + 'px';
+  } else {
+    $('#sidebar').style.width = SIDEBAR_DEFAULT + 'px';
+  }
+  if (localStorage.getItem(LS_COLLAPSED) === '1') {
+    setSidebarCollapsed(true);
+  }
+} catch (_) {}
+
+// Drag handle
+(function wireSidebarResizer() {
+  const resizer = $('#sidebar-resizer');
+  let dragging = false;
+  resizer.addEventListener('mousedown', (e) => {
+    if ($('#sidebar').classList.contains('collapsed')) return;
+    dragging = true;
+    resizer.classList.add('dragging');
+    $('#sidebar').classList.add('resizing');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    setSidebarWidth(e.clientX);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    $('#sidebar').classList.remove('resizing');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    refitActiveTerminal();
+  });
+  // Double-click to reset
+  resizer.addEventListener('dblclick', () => setSidebarWidth(SIDEBAR_DEFAULT));
+})();
+
+$('#btn-collapse').addEventListener('click', () => setSidebarCollapsed(true));
+$('#btn-expand').addEventListener('click', () => setSidebarCollapsed(false));
 
 // Initial load
 loadSessionsFromDisk();
