@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;" />
+  <title>Claude Sessions</title>
+  <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <div class="sidebar-title">Claude Sessions</div>
+      <div class="sidebar-actions">
+        <button id="btn-new" title="New session (Ctrl+N)">+ New</button>
+        <button id="btn-paste-img" title="Paste clipboard image (Ctrl+Shift+V)">Img</button>
+      </div>
+    </div>
+    <div id="session-list"></div>
+  </div>
+
+  <div id="main">
+    <div id="tab-bar">
+      <div id="tabs"></div>
+    </div>
+    <div id="terminal-area">
+      <div id="welcome">
+        <h1>Claude Sessions</h1>
+        <p>Double-click a session on the left to launch a terminal tab.</p>
+        <p class="hint">Ctrl+N new · Ctrl+W close tab · Ctrl+Tab switch · Ctrl+Shift+V paste image</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-overlay" class="hidden">
+    <div id="session-editor">
+      <div class="editor-header">
+        <span id="editor-title">New Session</span>
+        <button id="editor-close" title="Close (Esc)">&times;</button>
+      </div>
+      <form id="editor-form" autocomplete="off">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required maxlength="80" />
+        </div>
+
+        <div class="field">
+          <label>Type</label>
+          <div class="radio-row">
+            <label><input type="radio" name="type" value="local" /> Local (Windows)</label>
+            <label><input type="radio" name="type" value="ssh" /> SSH (Remote Linux)</label>
+          </div>
+        </div>
+
+        <div class="field ssh-only">
+          <label>SSH Host <span class="dim">(~/.ssh/config name or user@host)</span></label>
+          <input type="text" name="ssh_host" placeholder="remote-task" />
+        </div>
+
+        <div class="field">
+          <label>Working Dir</label>
+          <input type="text" name="working_dir" placeholder="/home/user or D:/path" />
+        </div>
+
+        <div class="field">
+          <label>Pre-command <span class="dim">(optional, runs before claude)</span></label>
+          <input type="text" name="pre_command" placeholder="export http_proxy=..." />
+        </div>
+
+        <div class="field">
+          <label>Claude Cmd <span class="dim">(default: claude)</span></label>
+          <input type="text" name="claude_cmd" placeholder="claude or /full/path/to/claude" />
+        </div>
+
+        <div class="field">
+          <label>Claude Args</label>
+          <input type="text" name="claude_args" placeholder="--dangerously-skip-permissions" />
+        </div>
+
+        <div class="field">
+          <label>Description</label>
+          <input type="text" name="description" maxlength="200" />
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" id="editor-cancel">Cancel</button>
+          <button type="submit" id="editor-save">Save (Ctrl+Enter)</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="context-menu" class="hidden"></div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
