@@ -107,11 +107,13 @@ function renderSessionList() {
     card.className = 'session-card';
     if (s.id === selectedSessionId) card.classList.add('selected');
     card.dataset.id = s.id;
+    card.draggable = true;
 
     const count = sessionInstanceCount(s.id);
 
     card.innerHTML = `
       <div class="session-card-top">
+        <span class="drag-handle" title="Drag to reorder">&#x2630;</span>
         <span class="session-name">${escapeHtml(s.name)}</span>
         <span class="badge ${s.type === 'ssh' ? 'ssh' : 'local'}">${s.type === 'ssh' ? 'SSH' : 'WIN'}</span>
         ${count > 0 ? `<span class="badge count">${count}</span>` : ''}
@@ -152,8 +154,71 @@ function renderSessionList() {
       });
     });
 
+    attachSessionDragHandlers(card, s.id);
     list.appendChild(card);
   }
+}
+
+// ============================================================================
+// Session card drag-and-drop reordering
+// ============================================================================
+
+let draggingSessionId = null;
+
+function attachSessionDragHandlers(el, sessionId) {
+  el.addEventListener('dragstart', (e) => {
+    // Don't start drag from the action buttons
+    if (e.target.matches('button')) { e.preventDefault(); return; }
+    draggingSessionId = sessionId;
+    el.classList.add('dragging');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', sessionId);
+    } catch (_) {}
+  });
+
+  el.addEventListener('dragend', () => {
+    draggingSessionId = null;
+    document.querySelectorAll('.session-card').forEach((c) => {
+      c.classList.remove('dragging', 'drop-above', 'drop-below');
+    });
+  });
+
+  el.addEventListener('dragover', (e) => {
+    if (!draggingSessionId || draggingSessionId === sessionId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = el.getBoundingClientRect();
+    const above = e.clientY < rect.top + rect.height / 2;
+    el.classList.toggle('drop-above', above);
+    el.classList.toggle('drop-below', !above);
+  });
+
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drop-above', 'drop-below');
+  });
+
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const fromId = draggingSessionId;
+    const toId = sessionId;
+    el.classList.remove('drop-above', 'drop-below');
+    if (!fromId || fromId === toId) return;
+
+    const rect = el.getBoundingClientRect();
+    const above = e.clientY < rect.top + rect.height / 2;
+
+    const fromIdx = sessions.findIndex((s) => s.id === fromId);
+    if (fromIdx < 0) return;
+    const [moved] = sessions.splice(fromIdx, 1);
+    let toIdx = sessions.findIndex((s) => s.id === toId);
+    if (toIdx < 0) toIdx = sessions.length;
+    if (!above) toIdx += 1;
+    sessions.splice(toIdx, 0, moved);
+
+    persistSessions();
+    renderSessionList();
+  });
 }
 
 // ============================================================================

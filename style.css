@@ -171,9 +171,23 @@ input[type=text]:focus { border-color: var(--accent); }
   padding: 8px 10px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
+  position: relative;
 }
 .session-card:hover { background: var(--bg-hover); border-color: var(--accent); }
 .session-card.selected { background: var(--bg-selected); border-color: var(--accent); }
+.session-card.dragging { opacity: 0.4; }
+.session-card.drop-above { box-shadow: 0 -2px 0 0 var(--accent); }
+.session-card.drop-below { box-shadow: 0  2px 0 0 var(--accent); }
+
+.drag-handle {
+  color: var(--fg-dim);
+  font-size: 12px;
+  cursor: grab;
+  padding-right: 2px;
+  user-select: none;
+}
+.drag-handle:active { cursor: grabbing; }
+.session-card:hover .drag-handle { color: var(--fg); }
 
 .session-card-top {
   display: flex;
