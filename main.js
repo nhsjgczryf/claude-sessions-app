@@ -37,15 +37,32 @@ function saveSessions(sessions) {
 }
 
 function buildSshCommand(session) {
+  const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
   const remoteParts = [];
-  remoteParts.push(
-    'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; true'
-  );
+
+  // The nvm workaround is only needed when we run claude in a
+  // non-interactive shell. For pure-shell mode we will exec an
+  // interactive shell below, which re-runs the user's .bashrc
+  // normally — no manual sourcing required.
+  if (hasClaude) {
+    remoteParts.push(
+      'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; true'
+    );
+  }
+
   if (session.working_dir) remoteParts.push(`cd "${session.working_dir}"`);
   if (session.pre_command) remoteParts.push(session.pre_command);
-  const claudeCmd = (session.claude_cmd && session.claude_cmd.trim()) || 'claude';
-  const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-  remoteParts.push(`${claudeCmd}${claudeArgs}`);
+
+  if (hasClaude) {
+    const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
+    remoteParts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
+  } else {
+    // Empty claude_cmd = pure shell session. Drop into the user's
+    // normal login+interactive shell so prompt, aliases, nvm, etc. all
+    // work. Exec replaces the outer bash, so Ctrl+D exits ssh cleanly.
+    remoteParts.push('exec "${SHELL:-bash}" -il');
+  }
+
   const remoteCmd = remoteParts.join(' && ');
   return `ssh -t ${session.ssh_host} ${shellQuote(remoteCmd)}`;
 }
@@ -53,9 +70,13 @@ function buildSshCommand(session) {
 function buildLocalCommand(session) {
   const parts = [];
   if (session.pre_command) parts.push(session.pre_command);
-  const claudeCmd = (session.claude_cmd && session.claude_cmd.trim()) || 'claude';
-  const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-  parts.push(`${claudeCmd}${claudeArgs}`);
+  const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
+  if (hasClaude) {
+    const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
+    parts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
+  }
+  // When no claude command, leave the locally-spawned PowerShell as-is
+  // (the PTY host is already a usable shell).
   return parts.join('; ');
 }
 

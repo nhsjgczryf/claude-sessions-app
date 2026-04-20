@@ -1,6 +1,6 @@
 # Claude Sessions
 
-基于 Electron + xterm.js 的桌面应用，用于同时管理多个 Claude Code 终端会话（本地 Windows 或 SSH 远程 Linux）。
+基于 Electron + xterm.js 的桌面应用，用于同时管理多个终端会话（本地 Windows 或 SSH 远程 Linux）。每个会话可以自动启动 Claude Code，也可以只是一个纯 SSH/本地 shell，方便在同一窗口里切换远程运维和 Claude 工作流。
 
 ![theme](https://img.shields.io/badge/theme-Catppuccin%20Mocha-cba6f7)
 ![electron](https://img.shields.io/badge/electron-%5E41.2.1-47848f)
@@ -89,7 +89,7 @@ npm start
 | `ssh_host` | SSH 主机（`~/.ssh/config` 名称或 `user@host`） |
 | `working_dir` | 工作目录 |
 | `pre_command` | 预执行命令（可选） |
-| `claude_cmd` | Claude 命令（留空则用 `claude`） |
+| `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |
 | `claude_args` | 附加参数 |
 | `description` | 描述文字 |
 
