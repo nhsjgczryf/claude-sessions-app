@@ -746,9 +746,6 @@ $('#btn-paste-img').addEventListener('click', () => pasteImageToActiveTab());
 $('#editor-close').addEventListener('click', closeEditor);
 $('#editor-cancel').addEventListener('click', closeEditor);
 $('#editor-form').addEventListener('submit', saveEditor);
-$('#modal-overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'modal-overlay') closeEditor();
-});
 document.querySelectorAll('#editor-form input[name="type"]').forEach((el) => {
   el.addEventListener('change', updateTypeVisibility);
 });
