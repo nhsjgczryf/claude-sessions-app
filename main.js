@@ -130,6 +130,15 @@ function createWindow() {
   mainWindow.setMenu(null);
   mainWindow.loadFile('index.html');
 
+  // Route any window.open / link that escapes to the system browser instead
+  // of letting Electron spawn a new BrowserWindow.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      require('electron').shell.openExternal(url).catch(() => {});
+    }
+    return { action: 'deny' };
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
     for (const [, entry] of terminals) {

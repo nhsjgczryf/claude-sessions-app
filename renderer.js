@@ -1,4 +1,4 @@
-const { ipcRenderer, clipboard } = require('electron');
+const { ipcRenderer, clipboard, shell } = require('electron');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
@@ -392,7 +392,10 @@ function launchSession(sessionId) {
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  term.loadAddon(new WebLinksAddon());
+  term.loadAddon(new WebLinksAddon((event, uri) => {
+    // Open links in the system default browser, not a new Electron window
+    shell.openExternal(uri).catch((err) => console.error('[link] openExternal failed:', err));
+  }));
   const unicodeAddon = new Unicode11Addon();
   term.loadAddon(unicodeAddon);
   term.unicode.activeVersion = '11';
