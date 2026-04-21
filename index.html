@@ -65,6 +65,11 @@
           <input type="text" name="ssh_host" placeholder="remote-task" />
         </div>
 
+        <div class="field ssh-only">
+          <label>Port Forwards <span class="dim">(one per line or comma-separated; becomes ssh -L)</span></label>
+          <textarea name="port_forwards" rows="2" placeholder="14500&#10;9222:9222&#10;3000:localhost:3000"></textarea>
+        </div>
+
         <div class="field">
           <label>Working Dir</label>
           <input type="text" name="working_dir" placeholder="/home/user or D:/path" />

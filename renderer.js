@@ -271,11 +271,11 @@ function openEditor(sessionId) {
 
   const session = sessionId ? sessions.find((s) => s.id === sessionId) : null;
   const values = session || {
-    name: '', type: 'local', ssh_host: '', working_dir: '',
+    name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
     pre_command: '', claude_cmd: '', claude_args: '', description: '',
   };
 
-  for (const key of ['name', 'ssh_host', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description']) {
+  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
   }
@@ -316,6 +316,7 @@ function saveEditor(e) {
     name,
     type: data.get('type') || 'local',
     ssh_host: (data.get('ssh_host') || '').toString().trim(),
+    port_forwards: (data.get('port_forwards') || '').toString().trim(),
     working_dir: (data.get('working_dir') || '').toString().trim(),
     pre_command: (data.get('pre_command') || '').toString(),
     claude_cmd: (data.get('claude_cmd') || '').toString().trim(),

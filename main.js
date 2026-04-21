@@ -36,6 +36,25 @@ function saveSessions(sessions) {
   fs.writeFileSync(CONFIG_PATH, payload, 'utf-8');
 }
 
+function parsePortForwards(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((spec) => {
+      // Bare number "14500" -> "14500:localhost:14500"
+      // "local:remote" (two parts) -> "local:localhost:remote"
+      // "local:host:remote" -> as-is
+      if (/^\d+$/.test(spec)) return `${spec}:localhost:${spec}`;
+      const parts = spec.split(':');
+      if (parts.length === 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+        return `${parts[0]}:localhost:${parts[1]}`;
+      }
+      return spec;
+    });
+}
+
 function buildSshCommand(session) {
   const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
   const remoteParts = [];
@@ -64,7 +83,11 @@ function buildSshCommand(session) {
   }
 
   const remoteCmd = remoteParts.join(' && ');
-  return `ssh -t ${session.ssh_host} ${shellQuote(remoteCmd)}`;
+  const forwards = parsePortForwards(session.port_forwards)
+    .map((spec) => `-L ${spec}`)
+    .join(' ');
+  const forwardFlags = forwards ? ` ${forwards}` : '';
+  return `ssh -t${forwardFlags} ${session.ssh_host} ${shellQuote(remoteCmd)}`;
 }
 
 function buildLocalCommand(session) {

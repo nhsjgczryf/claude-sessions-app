@@ -87,11 +87,32 @@ npm start
 | `name` | 显示名称 |
 | `type` | `local` 或 `ssh` |
 | `ssh_host` | SSH 主机（`~/.ssh/config` 名称或 `user@host`） |
+| `port_forwards` | SSH 本地端口转发，每行一条或逗号分隔。`14500` 会展开为 `14500:localhost:14500`；`14500:9222` 会展开为 `14500:localhost:9222`；完整 `local:host:remote` 直接原样传给 `ssh -L` |
 | `working_dir` | 工作目录 |
 | `pre_command` | 预执行命令（可选） |
 | `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |
 | `claude_args` | 附加参数 |
 | `description` | 描述文字 |
+
+## 示例：通过 xpra 查看远程 Chrome
+
+无头服务器上跑可视化 Chrome（登录、装插件等），通过 SSH 隧道用本地浏览器访问：
+
+**远程准备一次即可**：`sudo apt install xpra xvfb google-chrome-stable`
+
+**会话配置**：
+
+| 字段 | 值 |
+|------|----|
+| `type` | `ssh` |
+| `ssh_host` | `your-server` |
+| `port_forwards` | `14500` |
+| `pre_command` | `xpra start --start=google-chrome-stable --bind-tcp=0.0.0.0:14500 --html=on --exit-with-children=no :100 >/dev/null 2>&1 \|\| true` |
+| `claude_cmd` | *(留空，进入纯 shell)* |
+
+启动会话后，本地浏览器打开 <http://localhost:14500> 就能看到并操作远程 Chrome；带宽约 200 KB/s–1 MB/s，登录 / 安装扩展完全够用。
+
+同理可以用 `port_forwards: 9222` + `pre_command: google-chrome --headless=new --remote-debugging-port=9222 >/dev/null 2>&1 &` 来转发 Chrome DevTools Protocol，供本地 Claude / Playwright 调用。
 
 ## 技术栈
 

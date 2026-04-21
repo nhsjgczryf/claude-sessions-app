@@ -51,15 +51,24 @@ input[type=text], input[type=radio] {
   font-size: 13px;
   color: var(--fg);
 }
-input[type=text] {
+input[type=text], textarea {
   background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 6px 8px;
   width: 100%;
   outline: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
 }
-input[type=text]:focus { border-color: var(--accent); }
+textarea {
+  resize: vertical;
+  min-height: 48px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+}
+input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 
 /* =========================================== Sidebar */
 #sidebar {
