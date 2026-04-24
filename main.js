@@ -12,8 +12,49 @@ const LEGACY_CONFIG_PATH = path.join(__dirname, '..', 'claude-sessions', 'sessio
 
 const terminals = new Map();
 
+// Bash-style single-quote escaping — used for text that will be parsed by a
+// remote bash shell (e.g. arguments embedded inside the remote command).
 function shellQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+// Outer quoting for the *local* shell that hosts the PTY. We type the ssh
+// command into that shell, so the wrapping around the remote command must
+// match that shell's rules. PowerShell single-quoted strings escape `'` as
+// `''` (not `'\''`), and don't recognize `&&` outside quotes — so using the
+// bash rule on Windows leaves `&&` bare and the command fails to parse.
+function shellQuotePowershell(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+function quoteForLocalShell(s) {
+  return process.platform === 'win32' ? shellQuotePowershell(s) : shellQuote(s);
+}
+
+function sanitizeTmuxName(s) {
+  return String(s || '').replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+// Pick a tmux session name that doesn't collide with any currently-active
+// terminal in this app. Base = user-provided tmux_name, else `cs-<id>`.
+// When another live tab already holds the base, suffix -2, -3, ...
+// This restores the "multiple tabs per session" behavior for persistent mode:
+// the first tab gets the stable name (so reconnects find it), additional
+// tabs get their own persistent sessions instead of mirroring the first.
+function chooseTmuxName(session) {
+  const base =
+    sanitizeTmuxName(session.tmux_name) ||
+    `cs-${sanitizeTmuxName(session.id) || 'session'}`;
+  const occupied = new Set();
+  for (const [, entry] of terminals) {
+    if (entry.tmuxName) occupied.add(entry.tmuxName);
+  }
+  if (!occupied.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const name = `${base}-${i}`;
+    if (!occupied.has(name)) return name;
+  }
+  return `${base}-${Date.now()}`;
 }
 
 function loadSessions() {
@@ -55,9 +96,10 @@ function parsePortForwards(raw) {
     });
 }
 
-function buildSshCommand(session) {
+function buildSshCommand(session, opts = {}) {
   const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
   const persistent = !!session.persistent;
+  const tmuxName = opts.tmuxName;
 
   // Build the "work" part: nvm source (claude only), cd, pre_command,
   // and the claude launch command if any. Everything that should run
@@ -88,19 +130,18 @@ function buildSshCommand(session) {
     // exists (e.g. from a previous disconnect), just attach — do NOT
     // re-run setup. Otherwise create it detached, send the setup
     // commands to its first window, then attach.
-    const safeId = String(session.id || 'session').replace(/[^A-Za-z0-9_-]/g, '');
-    const tmuxName = `cs-${safeId}`;
+    const name = sanitizeTmuxName(tmuxName) || `cs-${sanitizeTmuxName(session.id) || 'session'}`;
     const setupCmd = setupParts.join(' && ');
     const init = setupCmd
-      ? `tmux new-session -d -s ${tmuxName}; tmux send-keys -t ${tmuxName} ${shellQuote(setupCmd)} Enter`
-      : `tmux new-session -d -s ${tmuxName}`;
+      ? `tmux new-session -d -s ${name}; tmux send-keys -t ${name} ${shellQuote(setupCmd)} Enter`
+      : `tmux new-session -d -s ${name}`;
     remoteCmd =
       `if ! command -v tmux >/dev/null 2>&1; then ` +
       `  echo "[claude-sessions] tmux not found on remote; install it or disable 'persistent'" >&2; ` +
       `  exec "\${SHELL:-bash}" -il; ` +
       `fi; ` +
-      `if ! tmux has-session -t ${tmuxName} 2>/dev/null; then ${init}; fi; ` +
-      `exec tmux attach -t ${tmuxName}`;
+      `if ! tmux has-session -t ${name} 2>/dev/null; then ${init}; fi; ` +
+      `exec tmux attach -t ${name}`;
   } else {
     if (!hasClaude) {
       // Pure shell: drop into user's normal login+interactive shell.
@@ -113,7 +154,7 @@ function buildSshCommand(session) {
     .map((spec) => `-L ${spec}`)
     .join(' ');
   const forwardFlags = forwards ? ` ${forwards}` : '';
-  return `ssh -t${forwardFlags} ${session.ssh_host} ${shellQuote(remoteCmd)}`;
+  return `ssh -t${forwardFlags} ${session.ssh_host} ${quoteForLocalShell(remoteCmd)}`;
 }
 
 function buildLocalCommand(session) {
@@ -149,7 +190,15 @@ function createTerminal(tabId, session, cols, rows) {
     useConpty: process.platform === 'win32',
   });
 
-  terminals.set(tabId, { pty: term, session });
+  // For persistent SSH sessions, pick a tmux name that doesn't clash with any
+  // active tab so a second tab on the same session becomes its own tmux
+  // session rather than mirroring the first.
+  const tmuxName =
+    session.type === 'ssh' && session.persistent
+      ? chooseTmuxName(session)
+      : null;
+
+  terminals.set(tabId, { pty: term, session, tmuxName });
 
   term.onData((data) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -170,7 +219,7 @@ function createTerminal(tabId, session, cols, rows) {
         const localCmd = buildLocalCommand(session);
         if (localCmd.trim()) term.write(localCmd + '\r');
       } else if (session.type === 'ssh' && session.ssh_host) {
-        const sshCmd = buildSshCommand(session);
+        const sshCmd = buildSshCommand(session, { tmuxName });
         term.write(sshCmd + '\r');
       }
     } catch (err) {

@@ -89,6 +89,7 @@ npm start
 | `ssh_host` | SSH 主机（`~/.ssh/config` 名称或 `user@host`） |
 | `port_forwards` | SSH 本地端口转发，每行一条或逗号分隔。`14500` 会展开为 `14500:localhost:14500`；`14500:9222` 会展开为 `14500:localhost:9222`；完整 `local:host:remote` 直接原样传给 `ssh -L` |
 | `persistent` | （SSH 会话）用 tmux 包一层，网络断开或关闭 tab 后远程进程继续跑；下次打开会 `tmux attach` 回到原状态 |
+| `tmux_name` | （可选，仅 persistent）自定义 tmux 会话基名，默认 `cs-<id>`。同一会话开多个 tab 时自动在基名后追加 `-2`、`-3`，避免彼此 mirror |
 | `working_dir` | 工作目录 |
 | `pre_command` | 预执行命令（可选） |
 | `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |
@@ -97,11 +98,12 @@ npm start
 
 ## 持久化（tmux）
 
-SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `cs-<sessionId>` 的 tmux 会话：
+SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `cs-<sessionId>`（或你在 `Tmux Session Name` 里填的名字）的 tmux 会话：
 
-- 第一次连接：`tmux new-session -d -s cs-<id>` 创建后台会话，把 `cd` + `pre_command` + `claude` 用 `tmux send-keys` 推进去，然后 `tmux attach`
+- 第一次连接：`tmux new-session -d -s <name>` 创建后台会话，把 `cd` + `pre_command` + `claude` 用 `tmux send-keys` 推进去，然后 `tmux attach`
 - 断网 / 关 tab / 机器重启后再连：检测到 tmux 会话已存在 → 直接 `tmux attach`，不重跑 setup；远端 claude / 构建进程继续跑
-- 需要彻底重启：远程手动 `tmux kill-session -t cs-<id>`，下次连接会重新初始化
+- 同一会话开多个 tab：第一个 tab 用基名，后续自动 `-2`、`-3`…每个 tab 是独立的 tmux session，不会互相 mirror
+- 需要彻底重启：远程手动 `tmux kill-session -t <name>`，下次连接会重新初始化
 
 需要远程机器装了 `tmux`；没装时会打印提示并退回普通 shell，不会中断。
 
