@@ -88,11 +88,22 @@ npm start
 | `type` | `local` 或 `ssh` |
 | `ssh_host` | SSH 主机（`~/.ssh/config` 名称或 `user@host`） |
 | `port_forwards` | SSH 本地端口转发，每行一条或逗号分隔。`14500` 会展开为 `14500:localhost:14500`；`14500:9222` 会展开为 `14500:localhost:9222`；完整 `local:host:remote` 直接原样传给 `ssh -L` |
+| `persistent` | （SSH 会话）用 tmux 包一层，网络断开或关闭 tab 后远程进程继续跑；下次打开会 `tmux attach` 回到原状态 |
 | `working_dir` | 工作目录 |
 | `pre_command` | 预执行命令（可选） |
 | `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |
 | `claude_args` | 附加参数 |
 | `description` | 描述文字 |
+
+## 持久化（tmux）
+
+SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `cs-<sessionId>` 的 tmux 会话：
+
+- 第一次连接：`tmux new-session -d -s cs-<id>` 创建后台会话，把 `cd` + `pre_command` + `claude` 用 `tmux send-keys` 推进去，然后 `tmux attach`
+- 断网 / 关 tab / 机器重启后再连：检测到 tmux 会话已存在 → 直接 `tmux attach`，不重跑 setup；远端 claude / 构建进程继续跑
+- 需要彻底重启：远程手动 `tmux kill-session -t cs-<id>`，下次连接会重新初始化
+
+需要远程机器装了 `tmux`；没装时会打印提示并退回普通 shell，不会中断。
 
 ## 示例：通过 xpra 查看远程 Chrome
 

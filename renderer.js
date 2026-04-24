@@ -272,12 +272,15 @@ function openEditor(sessionId) {
   const session = sessionId ? sessions.find((s) => s.id === sessionId) : null;
   const values = session || {
     name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
-    pre_command: '', claude_cmd: '', claude_args: '', description: '',
+    pre_command: '', claude_cmd: '', claude_args: '', description: '', persistent: false,
   };
 
   for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
+  }
+  if (form.elements['persistent']) {
+    form.elements['persistent'].checked = !!values.persistent;
   }
   const typeInput = form.querySelector(`input[name="type"][value="${values.type || 'local'}"]`);
   if (typeInput) typeInput.checked = true;
@@ -322,6 +325,7 @@ function saveEditor(e) {
     claude_cmd: (data.get('claude_cmd') || '').toString().trim(),
     claude_args: (data.get('claude_args') || '').toString(),
     description: (data.get('description') || '').toString(),
+    persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
   };
 
   if (payload.type === 'ssh' && !payload.ssh_host) {

@@ -57,32 +57,58 @@ function parsePortForwards(raw) {
 
 function buildSshCommand(session) {
   const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
-  const remoteParts = [];
+  const persistent = !!session.persistent;
+
+  // Build the "work" part: nvm source (claude only), cd, pre_command,
+  // and the claude launch command if any. Everything that should run
+  // once when the session is first created.
+  const setupParts = [];
 
   // The nvm workaround is only needed when we run claude in a
-  // non-interactive shell. For pure-shell mode we will exec an
-  // interactive shell below, which re-runs the user's .bashrc
-  // normally — no manual sourcing required.
-  if (hasClaude) {
-    remoteParts.push(
+  // non-interactive shell. Pure-shell mode gets an interactive shell
+  // (directly or via tmux) which re-runs .bashrc normally.
+  if (hasClaude && !persistent) {
+    setupParts.push(
       'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; true'
     );
   }
 
-  if (session.working_dir) remoteParts.push(`cd "${session.working_dir}"`);
-  if (session.pre_command) remoteParts.push(session.pre_command);
+  if (session.working_dir) setupParts.push(`cd "${session.working_dir}"`);
+  if (session.pre_command) setupParts.push(session.pre_command);
 
   if (hasClaude) {
     const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-    remoteParts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
-  } else {
-    // Empty claude_cmd = pure shell session. Drop into the user's
-    // normal login+interactive shell so prompt, aliases, nvm, etc. all
-    // work. Exec replaces the outer bash, so Ctrl+D exits ssh cleanly.
-    remoteParts.push('exec "${SHELL:-bash}" -il');
+    setupParts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
   }
 
-  const remoteCmd = remoteParts.join(' && ');
+  let remoteCmd;
+
+  if (persistent) {
+    // Persistent mode: wrap in tmux. If the named session already
+    // exists (e.g. from a previous disconnect), just attach — do NOT
+    // re-run setup. Otherwise create it detached, send the setup
+    // commands to its first window, then attach.
+    const safeId = String(session.id || 'session').replace(/[^A-Za-z0-9_-]/g, '');
+    const tmuxName = `cs-${safeId}`;
+    const setupCmd = setupParts.join(' && ');
+    const init = setupCmd
+      ? `tmux new-session -d -s ${tmuxName}; tmux send-keys -t ${tmuxName} ${shellQuote(setupCmd)} Enter`
+      : `tmux new-session -d -s ${tmuxName}`;
+    remoteCmd =
+      `if ! command -v tmux >/dev/null 2>&1; then ` +
+      `  echo "[claude-sessions] tmux not found on remote; install it or disable 'persistent'" >&2; ` +
+      `  exec "\${SHELL:-bash}" -il; ` +
+      `fi; ` +
+      `if ! tmux has-session -t ${tmuxName} 2>/dev/null; then ${init}; fi; ` +
+      `exec tmux attach -t ${tmuxName}`;
+  } else {
+    if (!hasClaude) {
+      // Pure shell: drop into user's normal login+interactive shell.
+      setupParts.push('exec "${SHELL:-bash}" -il');
+    }
+    remoteCmd = setupParts.join(' && ');
+  }
+
   const forwards = parsePortForwards(session.port_forwards)
     .map((spec) => `-L ${spec}`)
     .join(' ');

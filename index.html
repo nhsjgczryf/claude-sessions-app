@@ -70,6 +70,13 @@
           <textarea name="port_forwards" rows="2" placeholder="14500&#10;9222:9222&#10;3000:localhost:3000"></textarea>
         </div>
 
+        <div class="field ssh-only">
+          <label class="check-row">
+            <input type="checkbox" name="persistent" />
+            <span>Persistent (wrap in tmux — disconnects don't kill the session)</span>
+          </label>
+        </div>
+
         <div class="field">
           <label>Working Dir</label>
           <input type="text" name="working_dir" placeholder="/home/user or D:/path" />

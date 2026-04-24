@@ -441,6 +441,19 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   gap: 16px;
   padding: 4px 0;
 }
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.check-row input[type=checkbox] { cursor: pointer; }
 .radio-row label {
   font-size: 13px;
   color: var(--fg);
