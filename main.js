@@ -133,15 +133,15 @@ function buildSshCommand(session, opts = {}) {
     const name = sanitizeTmuxName(tmuxName) || `cs-${sanitizeTmuxName(session.id) || 'session'}`;
     const setupCmd = setupParts.join(' && ');
     const init = setupCmd
-      ? `tmux new-session -d -s ${name}; tmux send-keys -t ${name} ${shellQuote(setupCmd)} Enter`
-      : `tmux new-session -d -s ${name}`;
+      ? `tmux -u new-session -d -s ${name}; tmux send-keys -t ${name} ${shellQuote(setupCmd)} Enter`
+      : `tmux -u new-session -d -s ${name}`;
     remoteCmd =
       `if ! command -v tmux >/dev/null 2>&1; then ` +
       `  echo "[claude-sessions] tmux not found on remote; install it or disable 'persistent'" >&2; ` +
       `  exec "\${SHELL:-bash}" -il; ` +
       `fi; ` +
       `if ! tmux has-session -t ${name} 2>/dev/null; then ${init}; fi; ` +
-      `exec tmux attach -t ${name}`;
+      `exec tmux -u attach -t ${name}`;
   } else {
     if (!hasClaude) {
       // Pure shell: drop into user's normal login+interactive shell.
@@ -149,6 +149,14 @@ function buildSshCommand(session, opts = {}) {
     }
     remoteCmd = setupParts.join(' && ');
   }
+
+  // ssh non-interactive shells don't source .bashrc/.profile, so LANG/LC_ALL
+  // are typically unset. Without a UTF-8 locale, tmux renders multi-byte
+  // characters (Chinese, emoji, …) as `_`. Prepend a fallback so the locale
+  // is set for both the wrapping shell and any tmux server we spawn.
+  remoteCmd =
+    `export LC_ALL="\${LC_ALL:-C.UTF-8}" LANG="\${LANG:-C.UTF-8}"; ` +
+    remoteCmd;
 
   const forwards = parsePortForwards(session.port_forwards)
     .map((spec) => `-L ${spec}`)
