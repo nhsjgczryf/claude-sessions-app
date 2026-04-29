@@ -162,7 +162,11 @@ function buildSshCommand(session, opts = {}) {
     .map((spec) => `-L ${spec}`)
     .join(' ');
   const forwardFlags = forwards ? ` ${forwards}` : '';
-  return `ssh -t${forwardFlags} ${session.ssh_host} ${quoteForLocalShell(remoteCmd)}`;
+  // Keepalive so a dead network surfaces as an ssh exit within ~90s instead
+  // of hanging on TCP timeout. Required for the auto-reconnect path below
+  // (see term.onExit) to ever fire.
+  const keepalive = '-o ServerAliveInterval=30 -o ServerAliveCountMax=3';
+  return `ssh -t ${keepalive}${forwardFlags} ${session.ssh_host} ${quoteForLocalShell(remoteCmd)}`;
 }
 
 function buildLocalCommand(session) {
@@ -178,7 +182,16 @@ function buildLocalCommand(session) {
   return parts.join('; ');
 }
 
-function createTerminal(tabId, session, cols, rows) {
+// Auto-reconnect tuning. We only retry persistent ssh sessions, because
+// non-persistent ones lose all in-flight work on the remote side anyway —
+// silently re-attaching would lie about state. Bail out if the previous
+// attempt died too quickly (likely a config error, not a network blip) or
+// if we've already retried too many times in a row.
+const RECONNECT_MIN_UPTIME_MS = 5000;
+const RECONNECT_MAX_RETRIES = 5;
+const RECONNECT_DELAY_MS = 1500;
+
+function spawnPtyForTab(tabId, session, cols, rows) {
   const cwd =
     session.type === 'local'
       ? session.working_dir && fs.existsSync(session.working_dir)
@@ -189,7 +202,7 @@ function createTerminal(tabId, session, cols, rows) {
   const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash');
   const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
 
-  const term = pty.spawn(shell, shellArgs, {
+  return pty.spawn(shell, shellArgs, {
     name: 'xterm-256color',
     cols: cols || 120,
     rows: rows || 30,
@@ -197,30 +210,9 @@ function createTerminal(tabId, session, cols, rows) {
     env: { ...process.env },
     useConpty: process.platform === 'win32',
   });
+}
 
-  // For persistent SSH sessions, pick a tmux name that doesn't clash with any
-  // active tab so a second tab on the same session becomes its own tmux
-  // session rather than mirroring the first.
-  const tmuxName =
-    session.type === 'ssh' && session.persistent
-      ? chooseTmuxName(session)
-      : null;
-
-  terminals.set(tabId, { pty: term, session, tmuxName });
-
-  term.onData((data) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('terminal-data', tabId, data);
-    }
-  });
-
-  term.onExit(({ exitCode }) => {
-    terminals.delete(tabId);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('terminal-exit', tabId, exitCode);
-    }
-  });
-
+function sendStartupCommand(term, session, tmuxName) {
   setTimeout(() => {
     try {
       if (session.type === 'local') {
@@ -234,6 +226,98 @@ function createTerminal(tabId, session, cols, rows) {
       console.error('[pty] failed to send startup command:', err);
     }
   }, 800);
+}
+
+function attachPtyHandlers(tabId, entry, cols, rows) {
+  const { pty: term, session, tmuxName } = entry;
+
+  term.onData((data) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal-data', tabId, data);
+    }
+  });
+
+  term.onExit(({ exitCode }) => {
+    const current = terminals.get(tabId);
+    // If this exit belongs to a stale pty (already replaced by a reconnect),
+    // ignore it.
+    if (!current || current.pty !== term) return;
+
+    const shouldReconnect =
+      !current.userClosed &&
+      session.type === 'ssh' &&
+      session.persistent &&
+      session.ssh_host &&
+      Date.now() - current.lastStartAt >= RECONNECT_MIN_UPTIME_MS &&
+      current.retries < RECONNECT_MAX_RETRIES;
+
+    if (!shouldReconnect) {
+      terminals.delete(tabId);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('terminal-exit', tabId, exitCode);
+      }
+      return;
+    }
+
+    const attempt = current.retries + 1;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(
+        'terminal-data',
+        tabId,
+        `\r\n\x1b[33m[connection lost (exit ${exitCode}); reconnecting… attempt ${attempt}/${RECONNECT_MAX_RETRIES}]\x1b[0m\r\n`
+      );
+    }
+
+    setTimeout(() => {
+      const stillThere = terminals.get(tabId);
+      if (!stillThere || stillThere.pty !== term || stillThere.userClosed) return;
+      try {
+        const newTerm = spawnPtyForTab(tabId, session, cols, rows);
+        const newEntry = {
+          pty: newTerm,
+          session,
+          tmuxName,
+          lastStartAt: Date.now(),
+          retries: attempt,
+          userClosed: false,
+        };
+        terminals.set(tabId, newEntry);
+        attachPtyHandlers(tabId, newEntry, cols, rows);
+        sendStartupCommand(newTerm, session, tmuxName);
+      } catch (err) {
+        console.error('[reconnect] failed to respawn pty:', err);
+        terminals.delete(tabId);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('terminal-exit', tabId, exitCode);
+        }
+      }
+    }, RECONNECT_DELAY_MS);
+  });
+}
+
+function createTerminal(tabId, session, cols, rows) {
+  const term = spawnPtyForTab(tabId, session, cols, rows);
+
+  // For persistent SSH sessions, pick a tmux name that doesn't clash with any
+  // active tab so a second tab on the same session becomes its own tmux
+  // session rather than mirroring the first.
+  const tmuxName =
+    session.type === 'ssh' && session.persistent
+      ? chooseTmuxName(session)
+      : null;
+
+  const entry = {
+    pty: term,
+    session,
+    tmuxName,
+    lastStartAt: Date.now(),
+    retries: 0,
+    userClosed: false,
+  };
+  terminals.set(tabId, entry);
+
+  attachPtyHandlers(tabId, entry, cols, rows);
+  sendStartupCommand(term, session, tmuxName);
 
   return { ok: true };
 }
@@ -313,6 +397,8 @@ ipcMain.on('terminal-resize', (_evt, tabId, cols, rows) => {
 ipcMain.handle('kill-terminal', (_evt, tabId) => {
   const entry = terminals.get(tabId);
   if (entry) {
+    // Mark before kill() so the onExit handler suppresses auto-reconnect.
+    entry.userClosed = true;
     try { entry.pty.kill(); } catch (_) {}
     terminals.delete(tabId);
     return { ok: true };
