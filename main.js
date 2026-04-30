@@ -65,6 +65,34 @@ function saveSessions(sessions) {
   fs.writeFileSync(CONFIG_PATH, payload, 'utf-8');
 }
 
+// Resolve the absolute path of `ssh` on the local machine. node-pty's
+// Windows backend (winpty/conpty) does not search PATH the way CreateProcess
+// does — passing a bare 'ssh' yields "File not found". On Windows we look
+// in the standard OpenSSH location plus every PATH entry; on POSIX we just
+// trust PATH (pty.spawn there resolves correctly). Cached after the first
+// successful resolution.
+let _cachedSshPath = null;
+function resolveSshPath() {
+  if (_cachedSshPath) return _cachedSshPath;
+  if (process.platform !== 'win32') {
+    _cachedSshPath = 'ssh';
+    return _cachedSshPath;
+  }
+  const candidates = [];
+  if (process.env.SystemRoot) {
+    candidates.push(path.join(process.env.SystemRoot, 'System32', 'OpenSSH', 'ssh.exe'));
+  }
+  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const dir of pathDirs) {
+    candidates.push(path.join(dir, 'ssh.exe'));
+  }
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { _cachedSshPath = c; return c; } } catch (_) {}
+  }
+  // Last resort: hand the bare name back and let pty.spawn fail loudly.
+  return 'ssh';
+}
+
 function parsePortForwards(raw) {
   if (!raw) return [];
   return String(raw)
@@ -200,7 +228,7 @@ function spawnPtyForTab(tabId, session, cols, rows, tmuxName) {
   // between). When ssh exits, term.onExit fires — which is what the
   // auto-reconnect logic depends on.
   if (session.type === 'ssh' && session.ssh_host) {
-    return pty.spawn('ssh', buildSshArgs(session, { tmuxName }), {
+    return pty.spawn(resolveSshPath(), buildSshArgs(session, { tmuxName }), {
       ...baseOpts,
       cwd: os.homedir(),
     });
@@ -307,13 +335,21 @@ function createTerminal(tabId, session, cols, rows) {
       ? chooseTmuxName(session)
       : null;
 
-  // tmuxName has to be reserved before pty.spawn so a second tab opened
-  // simultaneously sees this name as occupied. Stash a placeholder.
+  // Reserve the tmux name in `terminals` so a concurrent createTerminal call
+  // sees it occupied. We must clear this placeholder if spawn throws —
+  // otherwise it leaks into IPC handlers and crashes them with
+  // `pty.write`/`pty.resize` on null.
   if (tmuxName) {
     terminals.set(tabId, { pty: null, session, tmuxName, lastStartAt: 0, retries: 0, userClosed: false });
   }
 
-  const term = spawnPtyForTab(tabId, session, cols, rows, tmuxName);
+  let term;
+  try {
+    term = spawnPtyForTab(tabId, session, cols, rows, tmuxName);
+  } catch (err) {
+    terminals.delete(tabId);
+    throw err;
+  }
 
   const entry = {
     pty: term,
@@ -362,7 +398,9 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     for (const [, entry] of terminals) {
-      try { entry.pty.kill(); } catch (_) {}
+      if (entry.pty) {
+        try { entry.pty.kill(); } catch (_) {}
+      }
     }
     terminals.clear();
   });
@@ -390,14 +428,14 @@ ipcMain.handle('create-terminal', (_evt, tabId, session, cols, rows) => {
 
 ipcMain.on('terminal-input', (_evt, tabId, data) => {
   const entry = terminals.get(tabId);
-  if (entry) {
+  if (entry && entry.pty) {
     try { entry.pty.write(data); } catch (err) { console.error('[terminal-input]', err); }
   }
 });
 
 ipcMain.on('terminal-resize', (_evt, tabId, cols, rows) => {
   const entry = terminals.get(tabId);
-  if (entry) {
+  if (entry && entry.pty) {
     try { entry.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0)); }
     catch (err) { console.error('[terminal-resize]', err); }
   }
@@ -408,7 +446,9 @@ ipcMain.handle('kill-terminal', (_evt, tabId) => {
   if (entry) {
     // Mark before kill() so the onExit handler suppresses auto-reconnect.
     entry.userClosed = true;
-    try { entry.pty.kill(); } catch (_) {}
+    if (entry.pty) {
+      try { entry.pty.kill(); } catch (_) {}
+    }
     terminals.delete(tabId);
     return { ok: true };
   }
