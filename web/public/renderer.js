@@ -25,11 +25,9 @@ const THEME = {
   brightCyan: '#94e2d5',   brightWhite: '#a6adc8',
 };
 
-const LS_TOKEN = 'claude-sessions.token';
 const LS_WIDTH = 'claude-sessions.sidebarWidth';
 const LS_COLLAPSED = 'claude-sessions.sidebarCollapsed';
 
-let token = localStorage.getItem(LS_TOKEN) || '';
 let ws = null;
 let sessions = [];
 let selectedSessionId = null;
@@ -59,22 +57,26 @@ function notify(message, type = 'info') {
   setTimeout(() => el.remove(), 3000);
 }
 
-function authHeaders() {
-  return token ? { 'X-Token': token } : {};
-}
-
 async function api(method, path, body) {
-  const headers = { 'Content-Type': 'application/json', ...authHeaders() };
   const res = await fetch(path, {
     method,
-    headers,
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) {
-    showLogin();
-    throw new Error('unauthorized');
+  if (!res.ok) {
+    let payload;
+    try { payload = await res.json(); } catch (_) {}
+    const err = new Error((payload && payload.error) || `HTTP ${res.status}`);
+    err.status = res.status;
+    // 401 on a non-auth endpoint = our session got revoked or expired.
+    // Bring the auth screen back. 401 on /api/auth/* (e.g. bad
+    // credentials, bad code) is expected; let the form handle it.
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
+      await showAuthScreen();
+    }
+    throw err;
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const ct = res.headers.get('content-type') || '';
   return ct.includes('application/json') ? res.json() : res.text();
 }
@@ -93,31 +95,56 @@ function sessionInstanceCount(sessionId) {
 }
 
 // ============================================================================
-// Auth / token
+// Auth (single-account: register on first run, then login)
 // ============================================================================
 
-function showLogin() {
-  $('#login-overlay').classList.remove('hidden');
-  $('#login-token').value = '';
-  $('#login-error').textContent = '';
-  setTimeout(() => $('#login-token').focus(), 50);
+async function fetchAuthStatus() {
+  const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
+  if (!res.ok) throw new Error('status: ' + res.status);
+  return res.json();
+}
+
+function showAuthForm(which) {
+  $('#auth-overlay').classList.remove('hidden');
+  $('#auth-loading').classList.add('hidden');
+  $('#login-form').classList.toggle('hidden', which !== 'login');
+  $('#register-form').classList.toggle('hidden', which !== 'register');
+  setTimeout(() => {
+    const form = which === 'login' ? $('#login-form') : $('#register-form');
+    const first = form.querySelector('input');
+    if (first) first.focus();
+  }, 50);
+}
+
+function hideAuthOverlay() {
+  $('#auth-overlay').classList.add('hidden');
+}
+
+async function showAuthScreen() {
+  // Decide which form to show based on server state.
+  $('#auth-overlay').classList.remove('hidden');
+  $('#auth-loading').classList.remove('hidden');
+  $('#login-form').classList.add('hidden');
+  $('#register-form').classList.add('hidden');
+  let status;
+  try { status = await fetchAuthStatus(); }
+  catch (_) {
+    $('#auth-loading').textContent = 'Server unreachable. Refresh to retry.';
+    return;
+  }
+  if (status.authenticated) {
+    hideAuthOverlay();
+    bootApp();
+    return;
+  }
+  showAuthForm(status.registered ? 'login' : 'register');
 }
 
 async function attemptStart() {
-  // Ask the server whether a token is needed.
-  let cfg;
-  try {
-    const res = await fetch('/api/config');
-    cfg = await res.json();
-  } catch (err) {
-    notify('Server unreachable', 'error');
-    return;
-  }
-  if (cfg.requireToken && !token) {
-    showLogin();
-    return;
-  }
-  // Verify token (if any) by hitting /api/sessions
+  await showAuthScreen();
+}
+
+async function bootApp() {
   try {
     sessions = await api('GET', '/api/sessions');
   } catch (err) {
@@ -125,19 +152,55 @@ async function attemptStart() {
     notify('Failed to load sessions: ' + err.message, 'error');
     return;
   }
-  $('#login-overlay').classList.add('hidden');
   renderSessionList();
   openWebSocket();
 }
 
-$('#login-submit').addEventListener('click', () => {
-  token = $('#login-token').value.trim();
-  localStorage.setItem(LS_TOKEN, token);
-  attemptStart();
+$('#login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = $('#login-form .auth-error');
+  errEl.textContent = '';
+  const fd = new FormData(e.target);
+  try {
+    await api('POST', '/api/auth/login', {
+      username: fd.get('username'),
+      password: fd.get('password'),
+    });
+    hideAuthOverlay();
+    bootApp();
+  } catch (err) {
+    errEl.textContent = err.message || 'Login failed';
+  }
 });
-$('#login-token').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('#login-submit').click();
+
+$('#register-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = $('#register-form .auth-error');
+  errEl.textContent = '';
+  const fd = new FormData(e.target);
+  const password = fd.get('password');
+  const confirm = fd.get('confirm');
+  if (password !== confirm) { errEl.textContent = 'Passwords do not match'; return; }
+  try {
+    await api('POST', '/api/auth/register', {
+      code: (fd.get('code') || '').toString().trim(),
+      username: (fd.get('username') || '').toString(),
+      password,
+    });
+    hideAuthOverlay();
+    bootApp();
+  } catch (err) {
+    errEl.textContent = err.message || 'Registration failed';
+  }
 });
+
+async function logout() {
+  try { await api('POST', '/api/auth/logout'); } catch (_) {}
+  // Tear down active terminals locally and reload to reset all state.
+  for (const t of tabs.slice()) closeTab(t.id);
+  if (ws) try { ws.close(); } catch (_) {}
+  location.reload();
+}
 
 // ============================================================================
 // WebSocket
@@ -145,16 +208,28 @@ $('#login-token').addEventListener('keydown', (e) => {
 
 function openWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/?token=${encodeURIComponent(token)}`;
+  // Auth comes from the HttpOnly session cookie sent automatically on
+  // the WebSocket upgrade — nothing to put in the URL.
+  const url = `${proto}://${location.host}/`;
   ws = new WebSocket(url);
   ws.onopen = () => console.log('[ws] open');
-  ws.onclose = () => {
-    console.log('[ws] closed');
-    notify('WebSocket disconnected. Reconnecting…', 'error');
-    for (const t of tabs) t.alive = false;
-    renderTabs();
-    renderSessionList();
-    setTimeout(openWebSocket, 1500);
+  ws.onclose = (ev) => {
+    console.log('[ws] closed', ev.code);
+    // 1006/1015 with no session = auth was revoked or expired.
+    // Re-check status; the auth screen will reappear if needed.
+    fetchAuthStatus().then((s) => {
+      if (!s.authenticated) {
+        showAuthScreen();
+        return;
+      }
+      notify('WebSocket disconnected. Reconnecting…', 'error');
+      for (const t of tabs) t.alive = false;
+      renderTabs();
+      renderSessionList();
+      setTimeout(openWebSocket, 1500);
+    }).catch(() => {
+      setTimeout(openWebSocket, 1500);
+    });
   };
   ws.onerror = (e) => console.error('[ws] error', e);
   ws.onmessage = (ev) => {
@@ -776,6 +851,9 @@ window.addEventListener('resize', () => {
 
 $('#btn-new').addEventListener('click', () => openEditor(null));
 $('#btn-paste-img').addEventListener('click', () => pasteImageToActiveTab());
+$('#btn-logout').addEventListener('click', () => {
+  if (confirm('Sign out of Claude Sessions?')) logout();
+});
 $('#editor-close').addEventListener('click', closeEditor);
 $('#editor-cancel').addEventListener('click', closeEditor);
 $('#editor-form').addEventListener('submit', saveEditor);

@@ -22,6 +22,7 @@
       <div class="sidebar-actions">
         <button id="btn-new" title="New session (Ctrl+N)">+ New</button>
         <button id="btn-paste-img" title="Paste clipboard image">Img</button>
+        <button id="btn-logout" title="Sign out">Logout</button>
       </div>
     </div>
     <div id="session-list"></div>
@@ -114,13 +115,54 @@
     </div>
   </div>
 
-  <div id="login-overlay" class="hidden">
-    <div id="login-box">
-      <div class="login-title">Token required</div>
-      <p>This server requires authentication. Paste your token to continue.</p>
-      <input type="password" id="login-token" placeholder="token" />
-      <button id="login-submit">Connect</button>
-      <div id="login-error" class="error"></div>
+  <div id="auth-overlay">
+    <div id="auth-box">
+
+      <!-- Login form -->
+      <form id="login-form" class="auth-form hidden" autocomplete="on">
+        <div class="auth-title">Sign in</div>
+        <p class="auth-sub">Single-account web access to Claude Sessions.</p>
+        <label>Username
+          <input type="text" name="username" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="primary">Sign in</button>
+        <div class="auth-error error"></div>
+      </form>
+
+      <!-- Register form (only shown when no account exists yet) -->
+      <form id="register-form" class="auth-form hidden" autocomplete="off">
+        <div class="auth-title">Create the account</div>
+        <p class="auth-sub">
+          One-time setup. Look at the server console for the
+          <strong>REGISTRATION CODE</strong>; without it you can't register.
+        </p>
+        <label>Registration code
+          <input type="text" name="code" autocomplete="off" autocapitalize="none" required />
+        </label>
+        <label>Username
+          <input type="text" name="username" autocomplete="username"
+                 pattern="[A-Za-z0-9._-]+" maxlength="64" required />
+          <span class="hint">letters, digits, <code>. _ -</code></span>
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="new-password"
+                 minlength="12" maxlength="256" required />
+          <span class="hint">at least 12 characters</span>
+        </label>
+        <label>Confirm password
+          <input type="password" name="confirm" autocomplete="new-password"
+                 minlength="12" maxlength="256" required />
+        </label>
+        <button type="submit" class="primary">Create account</button>
+        <div class="auth-error error"></div>
+      </form>
+
+      <!-- Loading placeholder while we ask the server which form to show -->
+      <div id="auth-loading" class="auth-loading">Checking…</div>
+
     </div>
   </div>
 

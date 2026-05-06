@@ -4,3 +4,7 @@ out/
 *.log
 .DS_Store
 .vscode/
+
+# Web auth state — never commit credentials or session tokens
+auth.json
+auth-sessions.json

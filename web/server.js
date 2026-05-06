@@ -1,17 +1,21 @@
 // Web version of Claude Sessions.
 //
+// Auth model: single account. On first run the server prints a one-time
+// registration code; the user opens the page, enters that code together
+// with a username + password, and the account is created. From then on
+// only that account can log in. Sessions live in HttpOnly+SameSite=Strict
+// cookies; the WebSocket upgrade reuses the same cookie.
+//
 // Run with:
-//   npm run web
-// or
-//   PORT=3000 HOST=0.0.0.0 TOKEN=mysecret node web/server.js
+//   npm run web                              (binds 127.0.0.1:3000)
+//   HOST=0.0.0.0 PORT=3000 npm run web       (LAN; auth required)
 //
-// Architecture:
-//   Browser (xterm.js) <-> WebSocket <-> Node (node-pty / ssh / scp)
-//
-// Defaults to binding to 127.0.0.1 (so it's not exposed on the LAN until
-// you opt in by setting HOST). When binding to anything other than
-// 127.0.0.1 we REQUIRE a TOKEN to be set, since this process is
-// effectively a remote shell server.
+// Env:
+//   HOST   default 127.0.0.1
+//   PORT   default 3000
+//   TRUST_PROXY  set to "1" if you sit behind a reverse proxy that
+//                terminates TLS (e.g. nginx, Caddy) so we can read
+//                X-Forwarded-Proto for the Secure cookie flag.
 
 const path = require('path');
 const fs = require('fs');
@@ -30,51 +34,159 @@ const {
   saveImageToTemp,
 } = require('../lib/session-runtime');
 
+const auth = require('../lib/auth');
+
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '127.0.0.1';
-const TOKEN = process.env.TOKEN || '';
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 
-if (HOST !== '127.0.0.1' && HOST !== 'localhost' && !TOKEN) {
-  console.error(
-    '[claude-sessions] Refusing to bind to ' + HOST + ' without TOKEN.\n' +
-    '  Set TOKEN=somesecret or restrict HOST=127.0.0.1.'
-  );
-  process.exit(1);
+// Print the one-time registration code if no account is set up yet.
+const initialCode = auth.ensureRegistrationCode();
+if (initialCode) {
+  console.log('\n' + '='.repeat(60));
+  console.log(' [claude-sessions] No account exists yet.');
+  console.log(' Register on the web UI with this one-time code:');
+  console.log('');
+  console.log('   REGISTRATION CODE: ' + initialCode);
+  console.log('');
+  console.log(' (Code is invalidated after first successful registration');
+  console.log('  or whenever the server restarts.)');
+  console.log('='.repeat(60) + '\n');
 }
 
 const app = express();
+if (TRUST_PROXY) app.set('trust proxy', true);
 app.use(express.json({ limit: '15mb' }));
 
-// Auth middleware: only enforced when TOKEN is set
-function requireToken(req, res, next) {
-  if (!TOKEN) return next();
-  const provided =
-    req.headers['x-token'] ||
-    req.query.token ||
-    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (provided !== TOKEN) return res.status(401).json({ error: 'unauthorized' });
+// ---- minimal cookie helpers (no extra dep) ---------------------------
+
+function parseCookies(req) {
+  const out = {};
+  const header = req.headers && req.headers.cookie;
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    try { out[k] = decodeURIComponent(v); } catch (_) { out[k] = v; }
+  }
+  return out;
+}
+
+function isSecureRequest(req) {
+  if (req.secure) return true;
+  if (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https') return true;
+  return false;
+}
+
+function setSessionCookie(req, res, sessionId) {
+  const flags = [
+    'HttpOnly',
+    'SameSite=Strict',
+    'Path=/',
+    `Max-Age=${Math.floor(auth.SESSION_TTL_MS / 1000)}`,
+  ];
+  if (isSecureRequest(req)) flags.push('Secure');
+  res.setHeader('Set-Cookie', `cs_session=${sessionId}; ${flags.join('; ')}`);
+}
+
+function clearSessionCookie(req, res) {
+  const flags = ['HttpOnly', 'SameSite=Strict', 'Path=/', 'Max-Age=0'];
+  if (isSecureRequest(req)) flags.push('Secure');
+  res.setHeader('Set-Cookie', `cs_session=; ${flags.join('; ')}`);
+}
+
+function clientIp(req) {
+  return (req.ip || req.socket && req.socket.remoteAddress || '?').toString();
+}
+
+// ---- middlewares -----------------------------------------------------
+
+function requireAuth(req, res, next) {
+  const cookies = parseCookies(req);
+  const session = auth.getSession(cookies.cs_session);
+  if (!session) return res.status(401).json({ error: 'unauthenticated' });
+  req.user = session.username;
   next();
 }
 
-// Static files: app shell + xterm assets straight from node_modules
+// ---- static files ----------------------------------------------------
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(
   '/vendor/xterm',
   express.static(path.join(__dirname, '..', 'node_modules', '@xterm'))
 );
 
-// REST API
-app.get('/api/config', (req, res) => {
-  // Tells the client whether auth is required (so the login screen knows
-  // when to prompt). Does not leak the token.
-  res.json({ requireToken: !!TOKEN });
+// ---- auth API --------------------------------------------------------
+
+app.get('/api/auth/status', (req, res) => {
+  const cookies = parseCookies(req);
+  const session = auth.getSession(cookies.cs_session);
+  res.json({
+    registered: auth.isRegistered(),
+    authenticated: !!session,
+    username: session ? session.username : null,
+  });
 });
 
-app.get('/api/sessions', requireToken, (_req, res) => {
-  res.json(loadSessions());
+app.post('/api/auth/register', async (req, res) => {
+  if (auth.isRegistered()) {
+    return res.status(409).json({ error: 'account already exists' });
+  }
+  // Treat registration attempts as login-grade for rate-limiting (an
+  // attacker guessing the registration code should still be throttled).
+  const rl = auth.checkRateLimit(clientIp(req));
+  if (!rl.ok) return res.status(429).json({ error: 'too many attempts; try again later' });
+
+  try {
+    const { username, password, code } = req.body || {};
+    const session = await auth.register({ username, password, code });
+    auth.resetRateLimit(clientIp(req));
+    setSessionCookie(req, res, session.sessionId);
+    res.json({ ok: true, username });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: String(err.message || err) });
+  }
 });
 
-app.post('/api/sessions', requireToken, (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
+  const ip = clientIp(req);
+  const rl = auth.checkRateLimit(ip);
+  if (!rl.ok) {
+    return res
+      .status(429)
+      .json({ error: 'too many attempts; try again later', retryAfterMs: rl.retryAfterMs });
+  }
+  try {
+    const { username, password } = req.body || {};
+    const session = await auth.login({ username, password });
+    auth.resetRateLimit(ip);
+    setSessionCookie(req, res, session.sessionId);
+    res.json({ ok: true, username });
+  } catch (err) {
+    res.status(401).json({ error: 'invalid credentials' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const cookies = parseCookies(req);
+  if (cookies.cs_session) auth.deleteSession(cookies.cs_session);
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
+// ---- protected API ---------------------------------------------------
+
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next();
+  return requireAuth(req, res, next);
+});
+
+app.get('/api/sessions', (_req, res) => res.json(loadSessions()));
+
+app.post('/api/sessions', (req, res) => {
   try {
     saveSessions(Array.isArray(req.body) ? req.body : (req.body && req.body.sessions) || []);
     res.json({ ok: true });
@@ -83,7 +195,7 @@ app.post('/api/sessions', requireToken, (req, res) => {
   }
 });
 
-app.post('/api/paste-image', requireToken, (req, res) => {
+app.post('/api/paste-image', (req, res) => {
   try {
     const dataUrl = req.body && req.body.dataUrl;
     if (!dataUrl || !/^data:image\/png;base64,/.test(dataUrl)) {
@@ -97,32 +209,30 @@ app.post('/api/paste-image', requireToken, (req, res) => {
   }
 });
 
-app.post('/api/scp-upload', requireToken, async (req, res) => {
+app.post('/api/scp-upload', async (req, res) => {
   const { sshHost, localPath } = req.body || {};
   const result = await scpUpload(sshHost, localPath);
   res.json(result);
 });
 
-// HTTP + WS share the same server so the token check on the upgrade
-// request can reuse the same logic.
-const server = http.createServer(app);
+// ---- HTTP + WebSocket ------------------------------------------------
 
+const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  if (TOKEN) {
-    const url = new URL(req.url, 'http://x');
-    const provided = url.searchParams.get('token') || req.headers['x-token'];
-    if (provided !== TOKEN) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+  const cookies = parseCookies(req);
+  const session = auth.getSession(cookies.cs_session);
+  if (!session) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.user = session.username;
+    wss.emit('connection', ws, req);
+  });
 });
-
-const SOCKET_TERMS = new WeakMap(); // ws -> Map<tabId, term>
 
 function send(ws, msg) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -130,7 +240,6 @@ function send(ws, msg) {
 
 wss.on('connection', (ws) => {
   const terms = new Map();
-  SOCKET_TERMS.set(ws, terms);
 
   ws.on('message', (raw) => {
     let msg;
@@ -166,7 +275,6 @@ wss.on('connection', (ws) => {
       }
 
       terms.set(tabId, term);
-
       term.onData((data) => send(ws, { type: 'data', tabId, data }));
       term.onExit(({ exitCode }) => {
         terms.delete(tabId);
@@ -210,11 +318,13 @@ wss.on('connection', (ws) => {
   });
 });
 
+// ---- start -----------------------------------------------------------
+
 server.listen(PORT, HOST, () => {
-  const url = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
-  console.log(`[claude-sessions] web UI listening on ${url}`);
-  if (TOKEN) console.log(`[claude-sessions] auth token required: ${TOKEN}`);
+  const display = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
+  console.log(`[claude-sessions] web UI listening on ${display}`);
   if (HOST === '0.0.0.0') {
     console.log('[claude-sessions] Bound on all interfaces — accessible on LAN.');
+    console.log('[claude-sessions] Use HTTPS in production (set TRUST_PROXY=1 if behind a TLS proxy).');
   }
 });
