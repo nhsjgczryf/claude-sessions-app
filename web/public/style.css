@@ -223,6 +223,7 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 .badge.local { background: rgba(166, 227, 161, 0.2); color: var(--green); }
 .badge.ssh   { background: rgba(249, 226, 175, 0.2); color: var(--yellow); }
+.badge.web   { background: rgba(245, 194, 231, 0.2); color: var(--magenta, #f5c2e7); }
 .badge.count { background: rgba(137, 180, 250, 0.2); color: var(--accent); }
 
 .session-desc {
@@ -352,6 +353,45 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 .terminal-container.active { display: block; }
 .terminal-container .xterm { height: 100%; }
 .terminal-container .xterm-viewport { background: var(--bg) !important; }
+
+/* Web (iframe) tab variant */
+.terminal-container.web-container {
+  padding: 0;
+  display: none;
+  flex-direction: column;
+}
+.terminal-container.web-container.active { display: flex; }
+.web-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.web-toolbar .web-url {
+  flex: 1;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.web-toolbar .web-btn {
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1;
+  min-width: 28px;
+}
+.web-iframe {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: white;
+}
 
 #welcome {
   position: absolute;

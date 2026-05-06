@@ -223,7 +223,8 @@ function openWebSocket() {
         return;
       }
       notify('WebSocket disconnected. Reconnecting…', 'error');
-      for (const t of tabs) t.alive = false;
+      // Only terminal tabs depend on the WS; web tabs are independent iframes.
+      for (const t of tabs) if (t.kind === 'terminal') t.alive = false;
       renderTabs();
       renderSessionList();
       setTimeout(openWebSocket, 1500);
@@ -236,7 +237,7 @@ function openWebSocket() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     const tab = tabs.find((t) => t.id === msg.tabId);
-    if (!tab) return;
+    if (!tab || tab.kind !== 'terminal') return;
     if (msg.type === 'data') tab.term.write(msg.data);
     else if (msg.type === 'exit') {
       tab.alive = false;
@@ -291,11 +292,13 @@ function renderSessionList() {
 
     const count = sessionInstanceCount(s.id);
 
+    const badgeClass = s.type === 'ssh' ? 'ssh' : s.type === 'web' ? 'web' : 'local';
+    const badgeText = s.type === 'ssh' ? 'SSH' : s.type === 'web' ? 'WEB' : 'LOCAL';
     card.innerHTML = `
       <div class="session-card-top">
         <span class="drag-handle" title="Drag to reorder">&#x2630;</span>
         <span class="session-name">${escapeHtml(s.name)}</span>
-        <span class="badge ${s.type === 'ssh' ? 'ssh' : 'local'}">${s.type === 'ssh' ? 'SSH' : 'LOCAL'}</span>
+        <span class="badge ${badgeClass}">${badgeText}</span>
         ${count > 0 ? `<span class="badge count">${count}</span>` : ''}
       </div>
       ${s.description ? `<div class="session-desc">${escapeHtml(s.description)}</div>` : ''}
@@ -431,9 +434,10 @@ function openEditor(sessionId) {
   const session = sessionId ? sessions.find((s) => s.id === sessionId) : null;
   const values = session || {
     name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
-    pre_command: '', claude_cmd: '', claude_args: '', description: '', persistent: false,
+    pre_command: '', claude_cmd: '', claude_args: '', description: '',
+    persistent: false, url: '',
   };
-  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description']) {
+  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'url']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
   }
@@ -453,9 +457,13 @@ function closeEditor() {
 
 function updateTypeVisibility() {
   const form = $('#editor-form');
-  const type = form.querySelector('input[name="type"]:checked');
-  const isSsh = type && type.value === 'ssh';
-  document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', !isSsh));
+  const checked = form.querySelector('input[name="type"]:checked');
+  const t = checked && checked.value;
+  document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', t !== 'ssh'));
+  document.querySelectorAll('.web-only').forEach((el) => el.classList.toggle('hidden', t !== 'web'));
+  // Fields irrelevant to web sessions (working_dir / pre_command / claude_*)
+  // could also be hidden, but they're harmless when empty so leave them
+  // visible for now to keep the UI predictable.
 }
 
 function saveEditor(e) {
@@ -475,9 +483,16 @@ function saveEditor(e) {
     claude_args: (data.get('claude_args') || '').toString(),
     description: (data.get('description') || '').toString(),
     persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
+    url: (data.get('url') || '').toString().trim(),
   };
   if (payload.type === 'ssh' && !payload.ssh_host) {
     notify('SSH host is required for SSH sessions', 'error'); return;
+  }
+  if (payload.type === 'web') {
+    if (!payload.url) { notify('URL is required for web sessions', 'error'); return; }
+    if (!/^https?:\/\//i.test(payload.url)) {
+      notify('URL must start with http:// or https://', 'error'); return;
+    }
   }
   if (editingId) {
     const idx = sessions.findIndex((s) => s.id === editingId);
@@ -520,6 +535,8 @@ function deleteSession(sessionId) {
 function launchSession(sessionId) {
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) return;
+  if (session.type === 'web') return launchWebSession(session);
+
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     notify('WebSocket not connected', 'error');
     return;
@@ -551,7 +568,10 @@ function launchSession(sessionId) {
   term.open(container);
   fitAddon.fit();
 
-  const tab = { id: tabId, sessionId, sessionName: displayName, term, fitAddon, container, alive: true };
+  const tab = {
+    id: tabId, sessionId, sessionName: displayName, kind: 'terminal',
+    term, fitAddon, container, alive: true,
+  };
   tabs.push(tab);
 
   term.onData((data) => { if (tab.alive) wsSend({ type: 'input', tabId, data }); });
@@ -567,17 +587,65 @@ function launchSession(sessionId) {
   renderSessionList();
 }
 
+function launchWebSession(session) {
+  const tabId = `tab-${++tabCounter}`;
+  const existing = sessionInstanceCount(session.id);
+  const displayName = existing === 0 ? session.name : `${session.name} #${existing + 1}`;
+
+  const container = document.createElement('div');
+  container.className = 'terminal-container web-container';
+  container.dataset.tabId = tabId;
+  $('#terminal-area').appendChild(container);
+
+  // Toolbar with reload + open-in-new-tab
+  const toolbar = document.createElement('div');
+  toolbar.className = 'web-toolbar';
+  toolbar.innerHTML = `
+    <button class="web-btn" data-act="reload" title="Reload">&#x21bb;</button>
+    <span class="web-url" title="${escapeHtml(session.url)}">${escapeHtml(session.url)}</span>
+    <button class="web-btn" data-act="external" title="Open in browser tab">&#x2197;</button>
+  `;
+  container.appendChild(toolbar);
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'web-iframe';
+  // Cache-busting `?t=...` not strictly needed; the proxy is stateless.
+  iframe.src = `/p/${encodeURIComponent(session.id)}/`;
+  iframe.referrerPolicy = 'no-referrer';
+  container.appendChild(iframe);
+
+  toolbar.querySelector('[data-act=reload]').addEventListener('click', () => {
+    try { iframe.contentWindow.location.reload(); }
+    catch (_) { iframe.src = iframe.src; } // cross-origin fallback
+  });
+  toolbar.querySelector('[data-act=external]').addEventListener('click', () => {
+    window.open(`/p/${encodeURIComponent(session.id)}/`, '_blank', 'noopener');
+  });
+
+  const tab = {
+    id: tabId, sessionId: session.id, sessionName: displayName, kind: 'web',
+    container, iframe, alive: true,
+  };
+  tabs.push(tab);
+
+  renderTabs();
+  switchToTab(tabId);
+  renderSessionList();
+}
+
 function switchToTab(tabId) {
   activeTabId = tabId;
   for (const t of tabs) t.container.classList.toggle('active', t.id === tabId);
   const tab = tabs.find((t) => t.id === tabId);
-  if (tab) {
+  if (tab && tab.kind === 'terminal') {
     try {
       tab.fitAddon.fit();
       const { cols, rows } = tab.term;
       if (tab.alive) wsSend({ type: 'resize', tabId, cols, rows });
       tab.term.focus();
     } catch (_) {}
+  } else if (tab && tab.kind === 'web') {
+    try { tab.iframe && tab.iframe.focus(); } catch (_) {}
   }
   $('#welcome').classList.toggle('hidden', tabs.length > 0);
   renderTabs();
@@ -587,8 +655,10 @@ function closeTab(tabId) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx < 0) return;
   const tab = tabs[idx];
-  if (tab.alive) wsSend({ type: 'kill', tabId });
-  try { tab.term.dispose(); } catch (_) {}
+  if (tab.kind === 'terminal') {
+    if (tab.alive) wsSend({ type: 'kill', tabId });
+    try { tab.term.dispose(); } catch (_) {}
+  }
   try { tab.container.remove(); } catch (_) {}
   tabs.splice(idx, 1);
   if (activeTabId === tabId) {
@@ -840,7 +910,7 @@ document.addEventListener('keydown', (e) => {
 
 window.addEventListener('resize', () => {
   const tab = tabs.find((t) => t.id === activeTabId);
-  if (tab) {
+  if (tab && tab.kind === 'terminal') {
     try {
       tab.fitAddon.fit();
       const { cols, rows } = tab.term;
@@ -879,7 +949,7 @@ function setSidebarCollapsed(collapsed) {
 }
 function refitActiveTerminal() {
   const tab = tabs.find((t) => t.id === activeTabId);
-  if (!tab) return;
+  if (!tab || tab.kind !== 'terminal') return;
   try {
     tab.fitAddon.fit();
     const { cols, rows } = tab.term;

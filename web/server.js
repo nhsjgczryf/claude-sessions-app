@@ -23,6 +23,7 @@ const os = require('os');
 const http = require('http');
 const express = require('express');
 const { WebSocketServer } = require('ws');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 const pty = require('node-pty');
 
 const {
@@ -215,6 +216,87 @@ app.post('/api/scp-upload', async (req, res) => {
   res.json(result);
 });
 
+// ---- Reverse proxy for type=web sessions -----------------------------
+//
+// Each web-type session gets a virtual mount point at /p/<sessionId>/*
+// that forwards (HTTP + WebSocket) to whatever URL the user configured.
+// We strip X-Frame-Options / frame-ancestors so the upstream can be
+// iframed inside our app, and rewrite cookie Path so cookies from one
+// upstream don't leak into another web tab.
+
+function findWebSession(sessionId) {
+  for (const s of loadSessions()) {
+    if (s.id === sessionId && s.type === 'web' && s.url) return s;
+  }
+  return null;
+}
+
+function makeProxy(sessionId, upstream) {
+  return createProxyMiddleware({
+    target: upstream,
+    changeOrigin: true,
+    ws: true,
+    pathRewrite: { [`^/p/${sessionId}`]: '' },
+    cookiePathRewrite: { '*': `/p/${sessionId}` },
+    cookieDomainRewrite: '',
+    on: {
+      proxyRes: (proxyRes /*, req, res */) => {
+        delete proxyRes.headers['x-frame-options'];
+        delete proxyRes.headers['content-security-policy-report-only'];
+        const csp = proxyRes.headers['content-security-policy'];
+        if (csp) {
+          // Strip frame-ancestors (which would otherwise still block embedding).
+          // Leave the rest of the policy alone.
+          const stripped = csp
+            .split(/;\s*/)
+            .filter((d) => !/^frame-ancestors\b/i.test(d))
+            .join('; ');
+          if (stripped) proxyRes.headers['content-security-policy'] = stripped;
+          else delete proxyRes.headers['content-security-policy'];
+        }
+        // 3xx redirects with absolute Location need rewriting back to /p/<id>/...
+        const loc = proxyRes.headers.location;
+        if (loc) {
+          try {
+            const u = new URL(loc, upstream);
+            const upstreamUrl = new URL(upstream);
+            if (u.host === upstreamUrl.host) {
+              proxyRes.headers.location = `/p/${sessionId}${u.pathname}${u.search}${u.hash}`;
+            }
+          } catch (_) {}
+        }
+      },
+      error: (err, req, res) => {
+        try {
+          if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Bad gateway: ' + (err && err.message || 'unknown'));
+          } else if (res && typeof res.destroy === 'function') {
+            res.destroy();
+          }
+        } catch (_) {}
+      },
+    },
+  });
+}
+
+// HTTP path: /p/<sessionId>/anything
+app.use((req, res, next) => {
+  const m = req.path.match(/^\/p\/([^/]+)/);
+  if (!m) return next();
+
+  // Auth: any web tab is at least as sensitive as our terminal.
+  const cookies = parseCookies(req);
+  if (!auth.getSession(cookies.cs_session)) {
+    return res.status(401).json({ error: 'unauthenticated' });
+  }
+
+  const session = findWebSession(m[1]);
+  if (!session) return res.status(404).type('text/plain').send('No web session with that id');
+
+  return makeProxy(m[1], session.url)(req, res, next);
+});
+
 // ---- HTTP + WebSocket ------------------------------------------------
 
 const server = http.createServer(app);
@@ -228,6 +310,24 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  // Dispatch: WS to /p/<id>/* goes through the matching reverse proxy
+  // (e.g. xpra HTML5 uses WS); everything else is our terminal channel.
+  let pathname = '/';
+  try { pathname = new URL(req.url || '/', 'http://x').pathname; } catch (_) {}
+  const m = pathname.match(/^\/p\/([^/]+)/);
+  if (m) {
+    const ws_session = findWebSession(m[1]);
+    if (!ws_session) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const proxy = makeProxy(m[1], ws_session.url);
+    proxy.upgrade(req, socket, head);
+    return;
+  }
+
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.user = session.username;
     wss.emit('connection', ws, req);

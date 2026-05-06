@@ -62,7 +62,13 @@
           <div class="radio-row">
             <label><input type="radio" name="type" value="local" /> Local</label>
             <label><input type="radio" name="type" value="ssh" /> SSH (Remote)</label>
+            <label><input type="radio" name="type" value="web" /> Web (URL)</label>
           </div>
+        </div>
+
+        <div class="field web-only">
+          <label>URL <span class="dim">(reachable from THIS server; can be SSH-tunneled localhost)</span></label>
+          <input type="text" name="url" placeholder="http://localhost:14500 or http://10.0.0.5:3000" />
         </div>
 
         <div class="field ssh-only">
