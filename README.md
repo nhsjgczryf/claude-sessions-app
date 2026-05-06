@@ -2,6 +2,8 @@
 
 基于 Electron + xterm.js 的桌面应用，用于同时管理多个终端会话（本地 Windows 或 SSH 远程 Linux）。每个会话可以自动启动 Claude Code，也可以只是一个纯 SSH/本地 shell，方便在同一窗口里切换远程运维和 Claude 工作流。
 
+> **也支持 Web 版**：相同后端 + xterm.js 浏览器前端，手机浏览器直接打开就能用 SSH + Claude Code，详见 [`web/README.md`](web/README.md)。`npm run web` 启动。
+
 ![theme](https://img.shields.io/badge/theme-Catppuccin%20Mocha-cba6f7)
 ![electron](https://img.shields.io/badge/electron-%5E41.2.1-47848f)
 ![xterm](https://img.shields.io/badge/xterm.js-%5E6.0.0-000)

@@ -3,131 +3,18 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
-const { execFile } = require('child_process');
+
+const {
+  loadSessions,
+  saveSessions,
+  buildSshCommand,
+  buildLocalCommand,
+  scpUpload,
+  saveImageToTemp,
+} = require('./lib/session-runtime');
 
 let mainWindow = null;
-
-const CONFIG_PATH = path.join(__dirname, 'sessions.json');
-const LEGACY_CONFIG_PATH = path.join(__dirname, '..', 'claude-sessions', 'sessions.json');
-
 const terminals = new Map();
-
-function shellQuote(s) {
-  return "'" + String(s).replace(/'/g, "'\\''") + "'";
-}
-
-function loadSessions() {
-  for (const p of [CONFIG_PATH, LEGACY_CONFIG_PATH]) {
-    try {
-      if (fs.existsSync(p)) {
-        const raw = fs.readFileSync(p, 'utf-8');
-        const data = JSON.parse(raw);
-        if (data && Array.isArray(data.sessions)) return data.sessions;
-      }
-    } catch (err) {
-      console.error(`[sessions] failed to read ${p}:`, err);
-    }
-  }
-  return [];
-}
-
-function saveSessions(sessions) {
-  const payload = JSON.stringify({ sessions }, null, 2);
-  fs.writeFileSync(CONFIG_PATH, payload, 'utf-8');
-}
-
-function parsePortForwards(raw) {
-  if (!raw) return [];
-  return String(raw)
-    .split(/[\n,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((spec) => {
-      // Bare number "14500" -> "14500:localhost:14500"
-      // "local:remote" (two parts) -> "local:localhost:remote"
-      // "local:host:remote" -> as-is
-      if (/^\d+$/.test(spec)) return `${spec}:localhost:${spec}`;
-      const parts = spec.split(':');
-      if (parts.length === 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
-        return `${parts[0]}:localhost:${parts[1]}`;
-      }
-      return spec;
-    });
-}
-
-function buildSshCommand(session) {
-  const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
-  const persistent = !!session.persistent;
-
-  // Build the "work" part: nvm source (claude only), cd, pre_command,
-  // and the claude launch command if any. Everything that should run
-  // once when the session is first created.
-  const setupParts = [];
-
-  // The nvm workaround is only needed when we run claude in a
-  // non-interactive shell. Pure-shell mode gets an interactive shell
-  // (directly or via tmux) which re-runs .bashrc normally.
-  if (hasClaude && !persistent) {
-    setupParts.push(
-      'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; true'
-    );
-  }
-
-  if (session.working_dir) setupParts.push(`cd "${session.working_dir}"`);
-  if (session.pre_command) setupParts.push(session.pre_command);
-
-  if (hasClaude) {
-    const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-    setupParts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
-  }
-
-  let remoteCmd;
-
-  if (persistent) {
-    // Persistent mode: wrap in tmux. If the named session already
-    // exists (e.g. from a previous disconnect), just attach — do NOT
-    // re-run setup. Otherwise create it detached, send the setup
-    // commands to its first window, then attach.
-    const safeId = String(session.id || 'session').replace(/[^A-Za-z0-9_-]/g, '');
-    const tmuxName = `cs-${safeId}`;
-    const setupCmd = setupParts.join(' && ');
-    const init = setupCmd
-      ? `tmux new-session -d -s ${tmuxName}; tmux send-keys -t ${tmuxName} ${shellQuote(setupCmd)} Enter`
-      : `tmux new-session -d -s ${tmuxName}`;
-    remoteCmd =
-      `if ! command -v tmux >/dev/null 2>&1; then ` +
-      `  echo "[claude-sessions] tmux not found on remote; install it or disable 'persistent'" >&2; ` +
-      `  exec "\${SHELL:-bash}" -il; ` +
-      `fi; ` +
-      `if ! tmux has-session -t ${tmuxName} 2>/dev/null; then ${init}; fi; ` +
-      `exec tmux attach -t ${tmuxName}`;
-  } else {
-    if (!hasClaude) {
-      // Pure shell: drop into user's normal login+interactive shell.
-      setupParts.push('exec "${SHELL:-bash}" -il');
-    }
-    remoteCmd = setupParts.join(' && ');
-  }
-
-  const forwards = parsePortForwards(session.port_forwards)
-    .map((spec) => `-L ${spec}`)
-    .join(' ');
-  const forwardFlags = forwards ? ` ${forwards}` : '';
-  return `ssh -t${forwardFlags} ${session.ssh_host} ${shellQuote(remoteCmd)}`;
-}
-
-function buildLocalCommand(session) {
-  const parts = [];
-  if (session.pre_command) parts.push(session.pre_command);
-  const hasClaude = !!(session.claude_cmd && session.claude_cmd.trim());
-  if (hasClaude) {
-    const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-    parts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
-  }
-  // When no claude command, leave the locally-spawned PowerShell as-is
-  // (the PTY host is already a usable shell).
-  return parts.join('; ');
-}
 
 function createTerminal(tabId, session, cols, rows) {
   const cwd =
@@ -200,8 +87,6 @@ function createWindow() {
   mainWindow.setMenu(null);
   mainWindow.loadFile('index.html');
 
-  // Route any window.open / link that escapes to the system browser instead
-  // of letting Electron spawn a new BrowserWindow.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
       require('electron').shell.openExternal(url).catch(() => {});
@@ -275,33 +160,14 @@ ipcMain.handle('paste-clipboard-image', () => {
   try {
     const img = clipboard.readImage();
     if (img.isEmpty()) return null;
-    const dir = path.join(os.tmpdir(), 'claude-clipboard');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const filePath = path.join(dir, `clip_${ts}.png`);
-    fs.writeFileSync(filePath, img.toPNG());
-    return filePath;
+    return saveImageToTemp(img.toPNG());
   } catch (err) {
     console.error('[paste-clipboard-image]', err);
     return null;
   }
 });
 
-ipcMain.handle('scp-upload', async (_evt, sshHost, localPath) => {
-  if (!sshHost || !localPath) return { ok: false, error: 'missing sshHost or localPath' };
-  const remoteName = path.basename(localPath);
-  const remoteDir = '/tmp/claude-clipboard';
-  const remotePath = `${remoteDir}/${remoteName}`;
-  return new Promise((resolve) => {
-    execFile('ssh', [sshHost, `mkdir -p ${remoteDir}`], { timeout: 15000 }, (err) => {
-      if (err) return resolve({ ok: false, error: `mkdir failed: ${err.message}` });
-      execFile('scp', [localPath, `${sshHost}:${remotePath}`], { timeout: 30000 }, (err2) => {
-        if (err2) return resolve({ ok: false, error: `scp failed: ${err2.message}` });
-        resolve({ ok: true, remotePath });
-      });
-    });
-  });
-});
+ipcMain.handle('scp-upload', (_evt, sshHost, localPath) => scpUpload(sshHost, localPath));
 
 app.whenReady().then(createWindow);
 

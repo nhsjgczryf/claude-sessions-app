@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#1e1e2e" />
+  <title>Claude Sessions (Web)</title>
+  <link rel="stylesheet" href="/vendor/xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/vendor/xterm/xterm/lib/xterm.js"></script>
+  <script src="/vendor/xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="/vendor/xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="/vendor/xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+</head>
+<body>
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <div class="sidebar-title-row">
+        <div class="sidebar-title">Claude Sessions</div>
+        <button id="btn-collapse" class="icon-btn" title="Collapse sidebar">&#x276E;</button>
+      </div>
+      <div class="sidebar-actions">
+        <button id="btn-new" title="New session (Ctrl+N)">+ New</button>
+        <button id="btn-paste-img" title="Paste clipboard image">Img</button>
+      </div>
+    </div>
+    <div id="session-list"></div>
+  </div>
+
+  <div id="sidebar-resizer" title="Drag to resize"></div>
+
+  <button id="btn-expand" class="icon-btn floating hidden" title="Expand sidebar">&#x276F;</button>
+
+  <div id="main">
+    <div id="tab-bar">
+      <div id="tabs"></div>
+    </div>
+    <div id="terminal-area">
+      <div id="welcome">
+        <h1>Claude Sessions</h1>
+        <p>Tap a session on the left to launch a terminal tab.</p>
+        <p class="hint">Ctrl+N new · Ctrl+W close · Ctrl+Tab switch</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-overlay" class="hidden">
+    <div id="session-editor">
+      <div class="editor-header">
+        <span id="editor-title">New Session</span>
+        <button id="editor-close" title="Close (Esc)">&times;</button>
+      </div>
+      <form id="editor-form" autocomplete="off">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required maxlength="80" />
+        </div>
+
+        <div class="field">
+          <label>Type</label>
+          <div class="radio-row">
+            <label><input type="radio" name="type" value="local" /> Local</label>
+            <label><input type="radio" name="type" value="ssh" /> SSH (Remote)</label>
+          </div>
+        </div>
+
+        <div class="field ssh-only">
+          <label>SSH Host <span class="dim">(~/.ssh/config name or user@host)</span></label>
+          <input type="text" name="ssh_host" placeholder="remote-task" />
+        </div>
+
+        <div class="field ssh-only">
+          <label>Port Forwards <span class="dim">(one per line or comma-separated; becomes ssh -L)</span></label>
+          <textarea name="port_forwards" rows="2" placeholder="14500&#10;9222:9222&#10;3000:localhost:3000"></textarea>
+        </div>
+
+        <div class="field ssh-only">
+          <label class="check-row">
+            <input type="checkbox" name="persistent" />
+            <span>Persistent (wrap in tmux — disconnects don't kill the session)</span>
+          </label>
+        </div>
+
+        <div class="field">
+          <label>Working Dir</label>
+          <input type="text" name="working_dir" placeholder="/home/user or D:/path" />
+        </div>
+
+        <div class="field">
+          <label>Pre-command <span class="dim">(optional, runs before claude)</span></label>
+          <input type="text" name="pre_command" placeholder="export http_proxy=..." />
+        </div>
+
+        <div class="field">
+          <label>Claude Cmd <span class="dim">(empty = plain shell, no auto-launch)</span></label>
+          <input type="text" name="claude_cmd" placeholder="claude, /full/path/to/claude, or leave empty" />
+        </div>
+
+        <div class="field">
+          <label>Claude Args</label>
+          <input type="text" name="claude_args" placeholder="--dangerously-skip-permissions" />
+        </div>
+
+        <div class="field">
+          <label>Description</label>
+          <input type="text" name="description" maxlength="200" />
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" id="editor-cancel">Cancel</button>
+          <button type="submit" id="editor-save">Save (Ctrl+Enter)</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="login-overlay" class="hidden">
+    <div id="login-box">
+      <div class="login-title">Token required</div>
+      <p>This server requires authentication. Paste your token to continue.</p>
+      <input type="password" id="login-token" placeholder="token" />
+      <button id="login-submit">Connect</button>
+      <div id="login-error" class="error"></div>
+    </div>
+  </div>
+
+  <div id="context-menu" class="hidden"></div>
+
+  <script src="/renderer.js"></script>
+</body>
+</html>
