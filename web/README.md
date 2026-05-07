@@ -135,6 +135,107 @@ browser ── /p/<sessionId>/...  ──▶  web/server.js
 - **跨标签页登录态隔离不完美**。两个 web session 都是同源 (`你的服务器:3000`)，所以 `localStorage`、`window.opener` 等会共享。一般问题不大，但**别拿这个代理跑一个公开网站和一个私有后台**，避免共享存储被滥用。
 - **WebRTC / 一些深度集成 native API 的页面**（比如 Google Meet 在 iframe 里的限制）依然受浏览器 iframe 沙箱影响，代理解决不了。
 
+---
+
+## Recipe：让 Claude 控制浏览器，你实时观察 / 随时介入
+
+很多任务（登录、过 captcha、装扩展、点 OAuth 同意按钮）必须有真实浏览器界面。这个 recipe 把三件事拼起来：
+
+1. **远程 headed Chrome**（跑在 Xvfb 虚拟显示上，无需真实显示器）
+2. **xpra HTML5** 把 Chrome 的画面流式推到你的浏览器里 → 你看到 Claude 的每一步操作；点 / 输入会回传到远程 Chrome → 你可以随时手动接管
+3. **MCP browser server**（[`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) 或 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)）通过 CDP 端口 9222 控制同一个 Chrome → Claude 通过 MCP 工具调用驱动浏览器
+
+三件事**都连接到同一个 Chrome 实例**：xpra 渲染显示，MCP 控制行为，你和 Claude 都看的是同一个画面。
+
+### 一次性准备（在远程服务器上）
+
+```bash
+# 1. 装系统依赖
+sudo apt install xpra xvfb google-chrome-stable
+
+# 2. 装一个 MCP browser server（任选其一）
+npm install -g @playwright/mcp@latest
+# 或
+# npm install -g chrome-devtools-mcp@latest
+
+# 3. 让 Claude Code 知道这个 MCP server
+mkdir -p ~/.claude
+cat > ~/.claude/mcp.json <<'EOF'
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--cdp-endpoint", "http://127.0.0.1:9222"
+      ]
+    }
+  }
+}
+EOF
+```
+
+> `--cdp-endpoint` 让 MCP server 不自己起浏览器，而是 attach 到我们已经跑起来的那个 Chrome（CDP 暴露在 9222）。`chrome-devtools-mcp` 用法类似，参考它的 README。
+
+### 在 app 里建两个会话
+
+**Session 1：SSH（启动 xpra+Chrome 并跑 Claude）**
+
+| 字段 | 值 |
+|------|----|
+| Type | `SSH` |
+| Name | `Claude+Browser` |
+| ssh_host | `my-server` |
+| port_forwards | `14500` |
+| persistent | ✅（推荐：tmux 包一层，Claude 长任务不会被断网中断） |
+| pre_command | （见下） |
+| claude_cmd | `claude` |
+| claude_args | `--mcp-config ~/.claude/mcp.json` *（如果你的 Claude Code 版本支持；不支持则上一步的全局 mcp.json 会被自动加载）* |
+
+`pre_command`（一行，分号分隔；首次连接会通过 `tmux send-keys` 在 tmux 里执行）：
+
+```bash
+( pgrep -f "xpra.*:100" >/dev/null || xpra start --start='google-chrome-stable --remote-debugging-port=9222 --no-sandbox --disable-features=Translate --user-data-dir=/tmp/chrome-claude' --bind-tcp=0.0.0.0:14500 --html=on --exit-with-children=no :100 >/dev/null 2>&1 ) ; sleep 1
+```
+
+要点：
+- `pgrep` 先检查 xpra 是不是已经在跑（持久化场景下重连不需要重新起）
+- `--remote-debugging-port=9222` **本地** 监听（不要 `0.0.0.0:9222`，CDP 没鉴权，**绝对不能暴露**），靠 SSH 隧道到本地 app server 即可
+- `--no-sandbox` 是 Chrome 跑在 root 下必须；非 root 可以不加
+- `--user-data-dir=/tmp/chrome-claude` 给一个独立的 profile，避免和别的 Chrome 冲突
+- `--start=` 用单引号包住——通过 app 启动时单引号会被 `shellQuote` 保护，安全到达远端 bash
+
+**Session 2：Web（看 Chrome）**
+
+| 字段 | 值 |
+|------|----|
+| Type | `Web` |
+| Name | `Browser View` |
+| url | `http://localhost:14500` |
+
+### 用法
+
+1. 启动 Session 1（SSH 终端 tab，里面跑着 Claude，已经能调 `browser_*` 这一组 MCP tools）
+2. 启动 Session 2（Web tab，里面是 xpra 渲染的远程 Chrome）
+3. 跟 Claude 说"帮我登录 example.com 然后下载这个月的报表" → Claude 调 MCP 的 `browser_navigate`、`browser_type`、`browser_click` → 你在 Session 2 里**看到 Claude 真的在点**
+4. 遇到 Google 验证码 / 短信 OTP / Passkey？**直接在 Session 2 的 iframe 里手动操作完**，xpra 是双向的，Claude 这边等待，然后告诉它"我登好了，继续"
+
+### 安全提示
+
+- 9222 永远只绑 `127.0.0.1`。CDP 给任何能连到的人 = 任意代码执行。我们的反代不暴露 9222，只暴露 14500。
+- 14500（xpra HTML5）通过 app 的 `/p/<id>/` 反代，**自动**继承 cookie 鉴权（账号没登录 → 401），所以即使你绑 `0.0.0.0` 也不是裸奔。
+- 用持久化 + tmux 时注意 Chrome 的用户态会留在 `/tmp/chrome-claude`——里面**会有登录 cookie 和登录态**。只在你信任的服务器上跑。
+
+### 进阶：Claude 看截图 vs Claude 看 DOM
+
+`@playwright/mcp` 默认走 DOM (accessibility tree) 操作，token 便宜、响应快、不容易被反爬识别。如果想让 Claude **看截图** 决策（像 Anthropic 的 computer-use 那样），加 `--vision` 启用：
+
+```json
+"args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://127.0.0.1:9222", "--vision"]
+```
+
+混合模式效果通常最好：DOM 优先，识别不出来的页面（canvas、weird shadow DOM）才截图给视觉模型看。
+
 ## 与桌面版的关系
 
 `sessions.json` 和 `lib/session-runtime.js` 都是共享的——你在 Web 版编辑会话、桌面版重新打开就能看到，反之亦然。SSH 命令构造（tmux 持久化、port forwards、nvm 兜底、纯 shell 模式）在两端**完全一致**。
