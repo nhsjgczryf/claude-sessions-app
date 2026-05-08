@@ -137,7 +137,36 @@ browser ── /p/<sessionId>/...  ──▶  web/server.js
 
 ---
 
-## Recipe：让 Claude 控制浏览器，你实时观察 / 随时介入
+## 长时间不操作 / 后台挂起会断吗？
+
+**短答**：
+
+- 服务端有 30s 一次的 WebSocket ping/pong 心跳，能挡掉大多数中间链路（NAT、Caddy/nginx、Cloudflare）的 idle 超时。
+- 真的断了（手机锁屏几分钟、网络切换、隧道掐了），客户端会自动重连，但**非持久 SSH / Local session 的 PTY 已经在断开的瞬间被杀，重连后是空终端**。
+- **任何你不希望被打断的工作都勾上 Persistent**：tmux 在远端把 shell 包了一层，重连的时候 `tmux attach` 接回原状态，claude 的对话历史、跑到一半的命令都还在。
+
+### 详细排错
+
+如果你即使勾了心跳也频繁断开，常见原因：
+
+1. **反向代理的 WebSocket 超时太短**
+   - **nginx**：默认 `proxy_read_timeout 60s`。WS 连接里 60 秒没数据就断。改成：
+     ```nginx
+     location / {
+         proxy_pass http://127.0.0.1:3000;
+         proxy_http_version 1.1;
+         proxy_set_header Upgrade $http_upgrade;
+         proxy_set_header Connection "upgrade";
+         proxy_read_timeout 1h;     # 别用默认值
+         proxy_send_timeout 1h;
+     }
+     ```
+   - **Caddy**：默认 WS 不超时，不需要改。
+   - **Cloudflare**：免费版 WS idle 上限 100s，我们 30s ping 在内，正常。
+
+2. **手机浏览器后台冻结**：iOS Safari / Chrome 在 tab 后台几分钟后会冻结 JS，WS 也会被 OS 关掉。回到前台时客户端会自动重连——这是浏览器本身的限制，没法绕，所以 Persistent 是真正的兜底。
+
+3. **运营商 NAT 超时**：某些 4G/5G 网络对 idle TCP 连接有 5–15 分钟超时。30s 心跳够用了。
 
 很多任务（登录、过 captcha、装扩展、点 OAuth 同意按钮）必须有真实浏览器界面。这个 recipe 把三件事拼起来：
 

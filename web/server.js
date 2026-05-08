@@ -338,7 +338,31 @@ function send(ws, msg) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
+// WebSocket heartbeat. Many intermediate links (NAT, mobile carriers,
+// nginx/Caddy in front of us) drop "idle" TCP connections after 60–300s.
+// Sending a WS ping every 30s keeps them all alive; if a client misses
+// two pongs in a row we terminate so resources are released and the
+// browser-side reconnect kicks in.
+const WS_PING_INTERVAL_MS = 30000;
+
+function heartbeat() { this.isAlive = true; }
+
+const heartbeatTimer = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch (_) {}
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  }
+}, WS_PING_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(heartbeatTimer));
+
 wss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', heartbeat);
   const terms = new Map();
 
   ws.on('message', (raw) => {
