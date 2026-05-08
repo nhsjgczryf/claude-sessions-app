@@ -90,7 +90,7 @@ npm start
 | `type` | `local` 或 `ssh` |
 | `ssh_host` | SSH 主机（`~/.ssh/config` 名称或 `user@host`） |
 | `port_forwards` | SSH 本地端口转发，每行一条或逗号分隔。`14500` 会展开为 `14500:localhost:14500`；`14500:9222` 会展开为 `14500:localhost:9222`；完整 `local:host:remote` 直接原样传给 `ssh -L` |
-| `persistent` | （SSH 会话）用 tmux 包一层，网络断开或关闭 tab 后远程进程继续跑；下次打开会 `tmux attach` 回到原状态 |
+| `persistent` | 用 tmux 包一层。SSH 在远端起 tmux，Local 在本地起 tmux（需要装 tmux；Windows 上是 no-op）。关闭 tab / 网络断开后进程继续跑；下次打开 `tmux attach` 回到原状态。 |
 | `working_dir` | 工作目录 |
 | `pre_command` | 预执行命令（可选） |
 | `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |

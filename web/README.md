@@ -143,7 +143,7 @@ browser ── /p/<sessionId>/...  ──▶  web/server.js
 
 - 服务端有 30s 一次的 WebSocket ping/pong 心跳，能挡掉大多数中间链路（NAT、Caddy/nginx、Cloudflare）的 idle 超时。
 - 真的断了（手机锁屏几分钟、网络切换、隧道掐了），客户端会自动重连，但**非持久 SSH / Local session 的 PTY 已经在断开的瞬间被杀，重连后是空终端**。
-- **任何你不希望被打断的工作都勾上 Persistent**：tmux 在远端把 shell 包了一层，重连的时候 `tmux attach` 接回原状态，claude 的对话历史、跑到一半的命令都还在。
+- **任何你不希望被打断的工作都勾上 Persistent**：tmux 把 shell 包了一层（远端 SSH session 在远端起 tmux，本地 session 在本地起 tmux），重连的时候 `tmux attach` 接回原状态，claude 的对话历史、跑到一半的命令都还在。本地需要装 tmux（`apt install tmux` / `brew install tmux`）；Windows PowerShell 没 tmux，本地持久化在 Windows 上是 no-op。
 
 ### 详细排错
 

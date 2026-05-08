@@ -461,9 +461,7 @@ function updateTypeVisibility() {
   const t = checked && checked.value;
   document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', t !== 'ssh'));
   document.querySelectorAll('.web-only').forEach((el) => el.classList.toggle('hidden', t !== 'web'));
-  // Fields irrelevant to web sessions (working_dir / pre_command / claude_*)
-  // could also be hidden, but they're harmless when empty so leave them
-  // visible for now to keep the UI predictable.
+  document.querySelectorAll('.not-web').forEach((el) => el.classList.toggle('hidden', t === 'web'));
 }
 
 function saveEditor(e) {

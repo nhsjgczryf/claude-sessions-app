@@ -81,10 +81,10 @@
           <textarea name="port_forwards" rows="2" placeholder="14500&#10;9222:9222&#10;3000:localhost:3000"></textarea>
         </div>
 
-        <div class="field ssh-only">
+        <div class="field not-web">
           <label class="check-row">
             <input type="checkbox" name="persistent" />
-            <span>Persistent (wrap in tmux — disconnects don't kill the session)</span>
+            <span>Persistent (wrap in tmux — disconnects don't kill the session; needs tmux installed; no-op on Windows)</span>
           </label>
         </div>
 

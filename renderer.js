@@ -300,10 +300,9 @@ function closeEditor() {
 function updateTypeVisibility() {
   const form = $('#editor-form');
   const type = form.querySelector('input[name="type"]:checked');
-  const isSsh = type && type.value === 'ssh';
-  document.querySelectorAll('.ssh-only').forEach((el) => {
-    el.classList.toggle('hidden', !isSsh);
-  });
+  const t = type && type.value;
+  document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', t !== 'ssh'));
+  document.querySelectorAll('.not-web').forEach((el) => el.classList.toggle('hidden', t === 'web'));
 }
 
 function saveEditor(e) {
