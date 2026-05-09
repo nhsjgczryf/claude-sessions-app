@@ -51,7 +51,7 @@ npm start
 
 ## 会话配置
 
-配置文件：`sessions.json`（应用目录下）。示例：
+配置文件：`sessions.json`（应用目录下，已被 `.gitignore` 忽略）。仓库里只提交了 `sessions.example.json` 作为模板，第一次使用前 `cp sessions.example.json sessions.json` 然后改成你自己的会话即可。示例：
 
 ```json
 {

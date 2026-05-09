@@ -8,3 +8,7 @@ out/
 # Web auth state — never commit credentials or session tokens
 auth.json
 auth-sessions.json
+
+# Local session config — copy sessions.example.json on first run.
+# Untracked so personal SSH hosts / paths never get pushed.
+sessions.json
