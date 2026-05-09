@@ -707,9 +707,14 @@ ipcRenderer.on('terminal-exit', (_e, tabId, exitCode) => {
       tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
       ipcRenderer.invoke('reconnect-terminal', tabId, cols, rows).then((res) => {
         if (res && res.ok) {
-          tab.alive = true;
-          renderTabs();
-          renderSessionList();
+          // Defer alive=true so this same keypress' onData (xterm may fire
+          // it AFTER onKey) sees alive=false and gets dropped — otherwise
+          // the literal 'r' slips into the new PTY's input.
+          setTimeout(() => {
+            tab.alive = true;
+            renderTabs();
+            renderSessionList();
+          }, 0);
         } else {
           const msg = (res && res.error) || 'unknown error';
           tab.term.write(`\r\n\x1b[31m[reconnect failed: ${msg}. Press any key to close.]\x1b[0m\r\n`);

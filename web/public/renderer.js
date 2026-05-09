@@ -228,12 +228,16 @@ function promptRecreateAfterWsLoss(tab) {
     }
     tab.term.write(`\x1b[33m[waiting for WebSocket…]\x1b[0m\r\n`);
     const fire = () => {
-      tab.alive = true;
+      // Defer alive=true so the in-flight 'r' keypress' onData (xterm may
+      // fire it AFTER onKey) doesn't slip through to the server.
+      setTimeout(() => {
+        tab.alive = true;
+        renderTabs();
+        renderSessionList();
+      }, 0);
       const cols = (tab.term && tab.term.cols) || 120;
       const rows = (tab.term && tab.term.rows) || 30;
       wsSend({ type: 'create', tabId: tab.id, session, cols, rows });
-      renderTabs();
-      renderSessionList();
     };
     if (ws && ws.readyState === WebSocket.OPEN) { fire(); return; }
     const started = Date.now();
@@ -301,9 +305,14 @@ function openWebSocket() {
           const cols = (tab.term && tab.term.cols) || 120;
           const rows = (tab.term && tab.term.rows) || 30;
           tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
-          tab.alive = true;
-          renderTabs();
-          renderSessionList();
+          // Defer alive=true so this same keypress' onData (which xterm
+          // may fire AFTER onKey) sees alive=false and gets dropped —
+          // otherwise the literal 'r' slips into the new PTY's input.
+          setTimeout(() => {
+            tab.alive = true;
+            renderTabs();
+            renderSessionList();
+          }, 0);
           wsSend({ type: 'reconnect', tabId: tab.id, cols, rows });
         } else {
           closeTab(tab.id);
