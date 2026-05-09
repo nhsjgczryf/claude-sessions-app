@@ -272,10 +272,11 @@ function openEditor(sessionId) {
   const session = sessionId ? sessions.find((s) => s.id === sessionId) : null;
   const values = session || {
     name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
-    pre_command: '', claude_cmd: '', claude_args: '', description: '', persistent: false,
+    pre_command: '', claude_cmd: '', claude_args: '', description: '',
+    persistent: false, tmux_name: '',
   };
 
-  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description']) {
+  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'tmux_name']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
   }
@@ -325,6 +326,7 @@ function saveEditor(e) {
     claude_args: (data.get('claude_args') || '').toString(),
     description: (data.get('description') || '').toString(),
     persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
+    tmux_name: (data.get('tmux_name') || '').toString().trim(),
   };
 
   if (payload.type === 'ssh' && !payload.ssh_host) {
