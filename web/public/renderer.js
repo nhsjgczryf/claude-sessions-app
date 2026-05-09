@@ -206,6 +206,51 @@ async function logout() {
 // WebSocket
 // ============================================================================
 
+// After the whole WS dropped (server-side PTYs are gone), let each tab
+// recover individually: print a prompt, on 'R' wait for the WS to be back
+// up and then issue a fresh `create` with the original session config.
+// For persistent SSH this lands back in the same remote tmux session.
+function promptRecreateAfterWsLoss(tab) {
+  tab.term.write(
+    `\r\n\x1b[33m[Connection lost. Press R to reconnect, any other key to close.]\x1b[0m\r\n`
+  );
+  const disposable = tab.term.onKey(({ domEvent }) => {
+    try { disposable.dispose(); } catch (_) {}
+    if (!domEvent || (domEvent.key !== 'r' && domEvent.key !== 'R')) {
+      closeTab(tab.id);
+      return;
+    }
+    const session = sessions.find((s) => s.id === tab.sessionId);
+    if (!session) {
+      tab.term.write(`\r\n\x1b[31m[session config missing — closing]\x1b[0m\r\n`);
+      closeTab(tab.id);
+      return;
+    }
+    tab.term.write(`\x1b[33m[waiting for WebSocket…]\x1b[0m\r\n`);
+    const fire = () => {
+      tab.alive = true;
+      const cols = (tab.term && tab.term.cols) || 120;
+      const rows = (tab.term && tab.term.rows) || 30;
+      wsSend({ type: 'create', tabId: tab.id, session, cols, rows });
+      renderTabs();
+      renderSessionList();
+    };
+    if (ws && ws.readyState === WebSocket.OPEN) { fire(); return; }
+    const started = Date.now();
+    const tick = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) { clearInterval(tick); fire(); return; }
+      if (Date.now() - started > 15000) {
+        clearInterval(tick);
+        tab.term.write(`\r\n\x1b[31m[WebSocket never came back. Press any key to close.]\x1b[0m\r\n`);
+        const d2 = tab.term.onKey(() => {
+          try { d2.dispose(); } catch (_) {}
+          closeTab(tab.id);
+        });
+      }
+    }, 250);
+  });
+}
+
 function openWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // Auth comes from the HttpOnly session cookie sent automatically on
@@ -223,8 +268,14 @@ function openWebSocket() {
         return;
       }
       notify('WebSocket disconnected. Reconnecting…', 'error');
-      // Only terminal tabs depend on the WS; web tabs are independent iframes.
-      for (const t of tabs) if (t.kind === 'terminal') t.alive = false;
+      // Server-side PTYs were killed when the WS dropped, so each terminal
+      // tab needs a fresh `create`. Prompt the user per-tab — for persistent
+      // SSH sessions this re-attaches to the same tmux on the remote.
+      for (const t of tabs) {
+        if (t.kind !== 'terminal' || !t.alive) continue;
+        t.alive = false;
+        promptRecreateAfterWsLoss(t);
+      }
       renderTabs();
       renderSessionList();
       setTimeout(openWebSocket, 1500);
