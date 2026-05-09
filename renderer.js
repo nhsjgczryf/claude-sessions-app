@@ -693,13 +693,35 @@ ipcRenderer.on('terminal-exit', (_e, tabId, exitCode) => {
   const tab = tabs.find((t) => t.id === tabId);
   if (!tab) return;
   tab.alive = false;
-  tab.term.write(`\r\n\x1b[33m[Session ended with code ${exitCode}. Press any key to close.]\x1b[0m\r\n`);
+  tab.term.write(
+    `\r\n\x1b[33m[Session ended with code ${exitCode}. Press R to reconnect, any other key to close.]\x1b[0m\r\n`
+  );
   renderTabs();
   renderSessionList();
 
-  const disposable = tab.term.onKey(() => {
+  const disposable = tab.term.onKey(({ domEvent }) => {
     try { disposable.dispose(); } catch (_) {}
-    closeTab(tabId);
+    if (domEvent && (domEvent.key === 'r' || domEvent.key === 'R')) {
+      const cols = (tab.term && tab.term.cols) || 120;
+      const rows = (tab.term && tab.term.rows) || 30;
+      tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
+      ipcRenderer.invoke('reconnect-terminal', tabId, cols, rows).then((res) => {
+        if (res && res.ok) {
+          tab.alive = true;
+          renderTabs();
+          renderSessionList();
+        } else {
+          const msg = (res && res.error) || 'unknown error';
+          tab.term.write(`\r\n\x1b[31m[reconnect failed: ${msg}. Press any key to close.]\x1b[0m\r\n`);
+          const d2 = tab.term.onKey(() => {
+            try { d2.dispose(); } catch (_) {}
+            closeTab(tabId);
+          });
+        }
+      });
+    } else {
+      closeTab(tabId);
+    }
   });
 });
 

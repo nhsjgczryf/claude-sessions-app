@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('api', {
   createTerminal: (tabId, session, cols, rows) =>
     ipcRenderer.invoke('create-terminal', tabId, session, cols, rows),
   killTerminal: (tabId) => ipcRenderer.invoke('kill-terminal', tabId),
+  reconnectTerminal: (tabId, cols, rows) =>
+    ipcRenderer.invoke('reconnect-terminal', tabId, cols, rows),
   sendInput: (tabId, data) => ipcRenderer.send('terminal-input', tabId, data),
   resizeTerminal: (tabId, cols, rows) =>
     ipcRenderer.send('terminal-resize', tabId, cols, rows),

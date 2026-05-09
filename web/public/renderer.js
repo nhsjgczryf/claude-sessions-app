@@ -241,10 +241,22 @@ function openWebSocket() {
     if (msg.type === 'data') tab.term.write(msg.data);
     else if (msg.type === 'exit') {
       tab.alive = false;
-      tab.term.write(`\r\n\x1b[33m[Session ended with code ${msg.exitCode}. Press any key to close.]\x1b[0m\r\n`);
-      const disposable = tab.term.onKey(() => {
+      tab.term.write(
+        `\r\n\x1b[33m[Session ended with code ${msg.exitCode}. Press R to reconnect, any other key to close.]\x1b[0m\r\n`
+      );
+      const disposable = tab.term.onKey(({ domEvent }) => {
         try { disposable.dispose(); } catch (_) {}
-        closeTab(tab.id);
+        if (domEvent && (domEvent.key === 'r' || domEvent.key === 'R')) {
+          const cols = (tab.term && tab.term.cols) || 120;
+          const rows = (tab.term && tab.term.rows) || 30;
+          tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
+          tab.alive = true;
+          renderTabs();
+          renderSessionList();
+          wsSend({ type: 'reconnect', tabId: tab.id, cols, rows });
+        } else {
+          closeTab(tab.id);
+        }
       });
       renderTabs();
       renderSessionList();

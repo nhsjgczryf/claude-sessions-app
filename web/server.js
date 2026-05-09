@@ -398,45 +398,102 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      terms.set(tabId, term);
-      term.onData((data) => send(ws, { type: 'data', tabId, data }));
-      term.onExit(({ exitCode }) => {
-        terms.delete(tabId);
-        send(ws, { type: 'exit', tabId, exitCode });
-      });
-
-      setTimeout(() => {
-        try {
-          if (session.type === 'local') {
-            const cmd = buildLocalCommand(session);
-            if (cmd.trim()) term.write(cmd + '\r');
-          } else if (session.type === 'ssh' && session.ssh_host) {
-            term.write(buildSshCommand(session) + '\r');
-          }
-        } catch (err) {
-          console.error('[pty] startup command failed:', err);
-        }
-      }, 800);
+      const entry = { pty: term, session, exited: false };
+      terms.set(tabId, entry);
+      attachTermHandlers(tabId, entry);
+      sendStartupForSession(term, session);
 
       send(ws, { type: 'ready', tabId });
+    } else if (msg.type === 'reconnect') {
+      // Re-spawn a PTY into the same tabId after a previous one exited.
+      // Only the original PTY is gone; the entry (with its session) is
+      // still here, so the new shell uses the same config and — for
+      // persistent SSH — `tmux attach`es back to the same remote session.
+      const { tabId, cols, rows } = msg;
+      const entry = terms.get(tabId);
+      if (!entry || !entry.exited || entry.pty) {
+        send(ws, { type: 'error', tabId, error: 'no exited terminal for this tab' });
+        return;
+      }
+      const session = entry.session;
+      const cwd =
+        session.type === 'local'
+          ? session.working_dir && fs.existsSync(session.working_dir)
+            ? session.working_dir
+            : os.homedir()
+          : os.homedir();
+      const shell = process.platform === 'win32'
+        ? 'powershell.exe'
+        : (process.env.SHELL || 'bash');
+      const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
+      let term;
+      try {
+        term = pty.spawn(shell, shellArgs, {
+          name: 'xterm-256color',
+          cols: cols || 120,
+          rows: rows || 30,
+          cwd,
+          env: { ...process.env },
+          useConpty: process.platform === 'win32',
+        });
+      } catch (err) {
+        send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
+        return;
+      }
+      entry.pty = term;
+      entry.exited = false;
+      attachTermHandlers(tabId, entry);
+      sendStartupForSession(term, session);
+      send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'input') {
-      const t = terms.get(msg.tabId);
-      if (t) try { t.write(msg.data); } catch (_) {}
+      const e = terms.get(msg.tabId);
+      if (e && e.pty) try { e.pty.write(msg.data); } catch (_) {}
     } else if (msg.type === 'resize') {
-      const t = terms.get(msg.tabId);
-      if (t) try { t.resize(Math.max(1, msg.cols | 0), Math.max(1, msg.rows | 0)); } catch (_) {}
+      const e = terms.get(msg.tabId);
+      if (e && e.pty) try { e.pty.resize(Math.max(1, msg.cols | 0), Math.max(1, msg.rows | 0)); } catch (_) {}
     } else if (msg.type === 'kill') {
-      const t = terms.get(msg.tabId);
-      if (t) {
-        try { t.kill(); } catch (_) {}
+      const e = terms.get(msg.tabId);
+      if (e) {
+        if (e.pty) { try { e.pty.kill(); } catch (_) {} }
         terms.delete(msg.tabId);
       }
     }
   });
 
+  // Helper: wire data + exit handlers for a freshly-spawned PTY. Kept
+  // inline (closes over `ws` and `terms`) so reconnect can reuse it.
+  function attachTermHandlers(tabId, entry) {
+    const term = entry.pty;
+    term.onData((data) => send(ws, { type: 'data', tabId, data }));
+    term.onExit(({ exitCode }) => {
+      const cur = terms.get(tabId);
+      // Stale exit (entry was already replaced or removed) — ignore.
+      if (!cur || cur.pty !== term) return;
+      cur.pty = null;
+      cur.exited = true;
+      cur.lastExitCode = exitCode;
+      send(ws, { type: 'exit', tabId, exitCode });
+    });
+  }
+
+  function sendStartupForSession(term, session) {
+    setTimeout(() => {
+      try {
+        if (session.type === 'local') {
+          const cmd = buildLocalCommand(session);
+          if (cmd.trim()) term.write(cmd + '\r');
+        } else if (session.type === 'ssh' && session.ssh_host) {
+          term.write(buildSshCommand(session) + '\r');
+        }
+      } catch (err) {
+        console.error('[pty] startup command failed:', err);
+      }
+    }, 800);
+  }
+
   ws.on('close', () => {
-    for (const t of terms.values()) {
-      try { t.kill(); } catch (_) {}
+    for (const e of terms.values()) {
+      if (e && e.pty) { try { e.pty.kill(); } catch (_) {} }
     }
     terms.clear();
   });

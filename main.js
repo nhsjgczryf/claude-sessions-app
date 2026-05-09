@@ -230,7 +230,16 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
       current.retries < RECONNECT_MAX_RETRIES;
 
     if (!shouldReconnect) {
-      terminals.delete(tabId);
+      // Keep the entry around (pty: null, exited: true) so the renderer's
+      // "Press R to reconnect" path can re-spawn into the same tabId — and
+      // so the reserved tmuxName isn't poached by a sibling tab. Cleared
+      // by an explicit kill-terminal IPC.
+      terminals.set(tabId, {
+        ...current,
+        pty: null,
+        exited: true,
+        lastExitCode: exitCode,
+      });
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('terminal-exit', tabId, exitCode);
       }
@@ -264,7 +273,17 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
         sendStartupCommand(newTerm, session);
       } catch (err) {
         console.error('[reconnect] failed to respawn pty:', err);
-        terminals.delete(tabId);
+        // Same fall-through as the !shouldReconnect branch above: keep the
+        // entry so the user can manually re-trigger via 'R'.
+        const after = terminals.get(tabId);
+        if (after) {
+          terminals.set(tabId, {
+            ...after,
+            pty: null,
+            exited: true,
+            lastExitCode: exitCode,
+          });
+        }
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal-exit', tabId, exitCode);
         }
@@ -366,6 +385,34 @@ ipcMain.handle('create-terminal', (_evt, tabId, session, cols, rows) => {
     return createTerminal(tabId, session, cols, rows);
   } catch (err) {
     console.error('[create-terminal] failed:', err);
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+// Re-spawn a PTY for a tab whose previous one exited. Reuses the original
+// session config and tmuxName so persistent sessions reattach to the same
+// tmux server instead of starting a fresh one.
+ipcMain.handle('reconnect-terminal', (_evt, tabId, cols, rows) => {
+  const entry = terminals.get(tabId);
+  if (!entry || !entry.exited || entry.pty) {
+    return { ok: false, error: 'no exited terminal for this tab' };
+  }
+  try {
+    const newTerm = spawnPtyForTab(tabId, entry.session, cols, rows, entry.tmuxName);
+    const newEntry = {
+      pty: newTerm,
+      session: entry.session,
+      tmuxName: entry.tmuxName,
+      lastStartAt: Date.now(),
+      retries: 0,
+      userClosed: false,
+    };
+    terminals.set(tabId, newEntry);
+    attachPtyHandlers(tabId, newEntry, cols, rows);
+    sendStartupCommand(newTerm, entry.session);
+    return { ok: true };
+  } catch (err) {
+    console.error('[reconnect-terminal] failed:', err);
     return { ok: false, error: String(err && err.message || err) };
   }
 });
