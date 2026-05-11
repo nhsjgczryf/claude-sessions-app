@@ -13,6 +13,7 @@ const {
   scpUpload,
   saveImageToTemp,
 } = require('./lib/session-runtime');
+const { acquireTunnel } = require('./lib/socks-tunnel');
 
 let mainWindow = null;
 const terminals = new Map();
@@ -161,7 +162,28 @@ const RECONNECT_MIN_UPTIME_MS = 5000;
 const RECONNECT_MAX_RETRIES = 5;
 const RECONNECT_DELAY_MS = 1500;
 
-function spawnPtyForTab(tabId, session, cols, rows, tmuxName) {
+// Build the env vars that point a locally-spawned process at our SSH SOCKS
+// bridge. We set both upper- and lower-case forms because the Node and
+// Python ecosystems disagree on which to honor. ALL_PROXY uses socks5h so
+// DNS resolution happens on the remote side (the whole point of "use the
+// remote box's network"); HTTPS_PROXY uses the HTTP bridge so anything
+// that doesn't grok socks5:// (incl. undici / claude-code) still works.
+function makeSocksProxyEnv(tunnel) {
+  const http = `http://127.0.0.1:${tunnel.bridgePort}`;
+  const socks = `socks5h://127.0.0.1:${tunnel.socksPort}`;
+  return {
+    HTTP_PROXY: http, HTTPS_PROXY: http,
+    http_proxy: http, https_proxy: http,
+    ALL_PROXY: socks, all_proxy: socks,
+    NO_PROXY: 'localhost,127.0.0.1,::1',
+    no_proxy: 'localhost,127.0.0.1,::1',
+  };
+}
+
+// Async: may need to await an SSH SOCKS tunnel for local sessions that opted
+// in. Returns `{ pty, releaseTunnel }` — callers MUST call releaseTunnel()
+// when the PTY exits, or the underlying ssh -D process leaks.
+async function spawnPtyForTab(tabId, session, cols, rows, tmuxName) {
   const baseOpts = {
     name: 'xterm-256color',
     cols: cols || 120,
@@ -174,10 +196,11 @@ function spawnPtyForTab(tabId, session, cols, rows, tmuxName) {
   // between). When ssh exits, term.onExit fires — which is what the
   // auto-reconnect logic depends on.
   if (session.type === 'ssh' && session.ssh_host) {
-    return pty.spawn(resolveSshPath(), buildSshArgs(session, { tmuxName }), {
+    const term = pty.spawn(resolveSshPath(), buildSshArgs(session, { tmuxName }), {
       ...baseOpts,
       cwd: os.homedir(),
     });
+    return { pty: term, releaseTunnel: null };
   }
 
   // Local sessions: keep the shell-as-PTY model. The user's pre_command /
@@ -189,7 +212,19 @@ function spawnPtyForTab(tabId, session, cols, rows, tmuxName) {
       : os.homedir();
   const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash');
   const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
-  return pty.spawn(shell, shellArgs, { ...baseOpts, cwd });
+
+  let env = baseOpts.env;
+  let releaseTunnel = null;
+  const socksHost = (session.socks_via_ssh || '').trim();
+  if (socksHost) {
+    const port = parseInt(session.socks_port, 10) || 1080;
+    const tun = await acquireTunnel(socksHost, port);
+    env = { ...env, ...makeSocksProxyEnv(tun) };
+    releaseTunnel = () => tun.release();
+  }
+
+  const term = pty.spawn(shell, shellArgs, { ...baseOpts, env, cwd });
+  return { pty: term, releaseTunnel };
 }
 
 function sendStartupCommand(term, session) {
@@ -230,6 +265,11 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
       current.retries < RECONNECT_MAX_RETRIES;
 
     if (!shouldReconnect) {
+      // Tunnel (if any) belonged to the dead PTY's env — release before we
+      // park the entry so 'press R' starts cleanly with a fresh one.
+      if (current.releaseTunnel) {
+        try { current.releaseTunnel(); } catch (_) {}
+      }
       // Keep the entry around (pty: null, exited: true) so the renderer's
       // "Press R to reconnect" path can re-spawn into the same tabId — and
       // so the reserved tmuxName isn't poached by a sibling tab. Cleared
@@ -237,6 +277,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
       terminals.set(tabId, {
         ...current,
         pty: null,
+        releaseTunnel: null,
         exited: true,
         lastExitCode: exitCode,
       });
@@ -255,15 +296,26 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
       );
     }
 
-    setTimeout(() => {
+    setTimeout(async () => {
       const stillThere = terminals.get(tabId);
       if (!stillThere || stillThere.pty !== term || stillThere.userClosed) return;
       try {
-        const newTerm = spawnPtyForTab(tabId, session, cols, rows, tmuxName);
+        const { pty: newTerm, releaseTunnel } = await spawnPtyForTab(
+          tabId, session, cols, rows, tmuxName
+        );
+        // Window/tab may have been closed while we awaited the tunnel —
+        // drop the freshly-spawned PTY if so to avoid an orphan.
+        const after = terminals.get(tabId);
+        if (!after || after.userClosed || after.pty !== term) {
+          try { newTerm.kill(); } catch (_) {}
+          if (releaseTunnel) { try { releaseTunnel(); } catch (_) {} }
+          return;
+        }
         const newEntry = {
           pty: newTerm,
           session,
           tmuxName,
+          releaseTunnel,
           lastStartAt: Date.now(),
           retries: attempt,
           userClosed: false,
@@ -280,6 +332,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
           terminals.set(tabId, {
             ...after,
             pty: null,
+            releaseTunnel: null,
             exited: true,
             lastExitCode: exitCode,
           });
@@ -292,7 +345,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
   });
 }
 
-function createTerminal(tabId, session, cols, rows) {
+async function createTerminal(tabId, session, cols, rows) {
   // Pick a tmux name first — spawnPtyForTab needs it to build ssh args for
   // persistent sessions.
   const tmuxName =
@@ -305,12 +358,12 @@ function createTerminal(tabId, session, cols, rows) {
   // otherwise it leaks into IPC handlers and crashes them with
   // `pty.write`/`pty.resize` on null.
   if (tmuxName) {
-    terminals.set(tabId, { pty: null, session, tmuxName, lastStartAt: 0, retries: 0, userClosed: false });
+    terminals.set(tabId, { pty: null, session, tmuxName, releaseTunnel: null, lastStartAt: 0, retries: 0, userClosed: false });
   }
 
-  let term;
+  let term, releaseTunnel;
   try {
-    term = spawnPtyForTab(tabId, session, cols, rows, tmuxName);
+    ({ pty: term, releaseTunnel } = await spawnPtyForTab(tabId, session, cols, rows, tmuxName));
   } catch (err) {
     terminals.delete(tabId);
     throw err;
@@ -320,6 +373,7 @@ function createTerminal(tabId, session, cols, rows) {
     pty: term,
     session,
     tmuxName,
+    releaseTunnel,
     lastStartAt: Date.now(),
     retries: 0,
     userClosed: false,
@@ -364,6 +418,9 @@ function createWindow() {
       if (entry.pty) {
         try { entry.pty.kill(); } catch (_) {}
       }
+      if (entry.releaseTunnel) {
+        try { entry.releaseTunnel(); } catch (_) {}
+      }
     }
     terminals.clear();
   });
@@ -380,9 +437,9 @@ ipcMain.handle('save-sessions', (_evt, sessions) => {
   }
 });
 
-ipcMain.handle('create-terminal', (_evt, tabId, session, cols, rows) => {
+ipcMain.handle('create-terminal', async (_evt, tabId, session, cols, rows) => {
   try {
-    return createTerminal(tabId, session, cols, rows);
+    return await createTerminal(tabId, session, cols, rows);
   } catch (err) {
     console.error('[create-terminal] failed:', err);
     return { ok: false, error: String(err && err.message || err) };
@@ -392,17 +449,20 @@ ipcMain.handle('create-terminal', (_evt, tabId, session, cols, rows) => {
 // Re-spawn a PTY for a tab whose previous one exited. Reuses the original
 // session config and tmuxName so persistent sessions reattach to the same
 // tmux server instead of starting a fresh one.
-ipcMain.handle('reconnect-terminal', (_evt, tabId, cols, rows) => {
+ipcMain.handle('reconnect-terminal', async (_evt, tabId, cols, rows) => {
   const entry = terminals.get(tabId);
   if (!entry || !entry.exited || entry.pty) {
     return { ok: false, error: 'no exited terminal for this tab' };
   }
   try {
-    const newTerm = spawnPtyForTab(tabId, entry.session, cols, rows, entry.tmuxName);
+    const { pty: newTerm, releaseTunnel } = await spawnPtyForTab(
+      tabId, entry.session, cols, rows, entry.tmuxName
+    );
     const newEntry = {
       pty: newTerm,
       session: entry.session,
       tmuxName: entry.tmuxName,
+      releaseTunnel,
       lastStartAt: Date.now(),
       retries: 0,
       userClosed: false,
@@ -439,6 +499,9 @@ ipcMain.handle('kill-terminal', (_evt, tabId) => {
     entry.userClosed = true;
     if (entry.pty) {
       try { entry.pty.kill(); } catch (_) {}
+    }
+    if (entry.releaseTunnel) {
+      try { entry.releaseTunnel(); } catch (_) {}
     }
     terminals.delete(tabId);
     return { ok: true };

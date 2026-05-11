@@ -97,6 +97,8 @@ npm start
 | `claude_cmd` | Claude 命令；**留空则不自动启动任何命令，直接进入 shell**（SSH 会话会 `exec $SHELL -il` 给你一个正常的交互式 shell） |
 | `claude_args` | 附加参数 |
 | `description` | 描述文字 |
+| `socks_via_ssh` | （仅 local）`ssh -D` 的远端主机名（`~/.ssh/config` 名称或 `user@host`）。设了之后，本地 shell 的所有出站 HTTP/HTTPS 会经远端 Linux 出口，详见下文。 |
+| `socks_port` | （仅 local，配合上者）本地 SOCKS5 端口，默认 `1080`。同一 host:port 在多个 tab 间共享一条 tunnel，refcount 归零时自动关掉。 |
 
 ## 持久化（tmux）
 
@@ -108,6 +110,37 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 - 需要彻底重启：远程手动 `tmux kill-session -t <name>`，下次连接会重新初始化
 
 需要远程机器装了 `tmux`；没装时会打印提示并退回普通 shell，不会中断。
+
+## 本地 Claude，远端网络（SOCKS via SSH）
+
+适合的场景：你想让 `claude` 在 Windows / macOS 本地跑（读本地文件、用本地 IDE 集成），但又想让它的 API 请求从一台已经做好 SSH 免密的远端 Linux 出去（比如那台机器有公网直连或翻墙能力，本地没有）。
+
+**配置方式**：本地 session 填两个字段：
+
+| 字段 | 值 |
+|------|----|
+| `type` | `local` |
+| `socks_via_ssh` | `remote-linux`（`~/.ssh/config` 里的名字，或 `user@host`） |
+| `socks_port` | `1080`（可改；只要本机这个端口空着就行） |
+| `claude_cmd` | `claude` |
+
+**工作流程**：
+
+1. 启动 tab 时，app 在本地后台跑 `ssh -D 127.0.0.1:<socks_port> -N <socks_via_ssh>`（开启 `ExitOnForwardFailure=yes` + `BatchMode=yes`，所以没有密钥/不通会立即报错而不是挂住）。
+2. 同时启动一个 HTTP 代理桥（127.0.0.1 上随机端口），让那些不认 `socks5://` 协议的工具（包括 Anthropic SDK / claude-code，因为它内部走 undici 不直接支持 SOCKS）也能用。该桥同时支持 `CONNECT`（HTTPS 隧道，claude 走这条）和绝对 URI 的纯 HTTP 转发（`GET http://… HTTP/1.1`，比如 `npm install`、`apt`），所以是个完整的正向代理。
+3. PTY 里的 powershell / bash 启动时注入这些环境变量：
+   - `HTTP_PROXY` / `HTTPS_PROXY` = `http://127.0.0.1:<bridge>`（HTTP 代理形式，最广兼容）
+   - `ALL_PROXY` = `socks5h://127.0.0.1:<socks_port>`（给原生支持 SOCKS 的工具用；`h` 表示 DNS 也在远端解析）
+   - `NO_PROXY` = `localhost,127.0.0.1,::1`
+4. 关 tab / 应用退出时自动 kill 掉那个 `ssh -D`。多个 tab 共用同一 `host:port` 会共享一条 tunnel，最后一个 tab 关掉才回收。
+
+**前置条件**：
+
+- 本机 `ssh` 命令可用（Windows 10/11 自带 OpenSSH 即可）。
+- `ssh <host>` 已经免密（密钥就绪、`~/.ssh/config` 写好）。`BatchMode=yes` 模式下，如果要交互输密码会直接失败。
+- 端口 `socks_port` 本机未被占用。
+
+**验证**：tab 里跑 `curl https://api.ipify.org`——返回的应该是那台远端 Linux 的公网 IP，而不是本机的。
 
 ## 示例：通过 xpra 查看远程 Chrome
 

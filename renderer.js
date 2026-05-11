@@ -273,10 +273,10 @@ function openEditor(sessionId) {
   const values = session || {
     name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
     pre_command: '', claude_cmd: '', claude_args: '', description: '',
-    persistent: false, tmux_name: '',
+    persistent: false, tmux_name: '', socks_via_ssh: '', socks_port: '',
   };
 
-  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'tmux_name']) {
+  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'tmux_name', 'socks_via_ssh', 'socks_port']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
   }
@@ -303,6 +303,7 @@ function updateTypeVisibility() {
   const type = form.querySelector('input[name="type"]:checked');
   const t = type && type.value;
   document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', t !== 'ssh'));
+  document.querySelectorAll('.local-only').forEach((el) => el.classList.toggle('hidden', t !== 'local'));
   document.querySelectorAll('.not-web').forEach((el) => el.classList.toggle('hidden', t === 'web'));
 }
 
@@ -327,6 +328,8 @@ function saveEditor(e) {
     description: (data.get('description') || '').toString(),
     persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
     tmux_name: (data.get('tmux_name') || '').toString().trim(),
+    socks_via_ssh: (data.get('socks_via_ssh') || '').toString().trim(),
+    socks_port: (data.get('socks_port') || '').toString().trim(),
   };
 
   if (payload.type === 'ssh' && !payload.ssh_host) {

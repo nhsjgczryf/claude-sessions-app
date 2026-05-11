@@ -82,6 +82,16 @@
           <input type="text" name="tmux_name" placeholder="cs-mywork" />
         </div>
 
+        <div class="field local-only">
+          <label>SOCKS via SSH <span class="dim">(optional; route this local shell's outbound HTTP/HTTPS through ssh -D &lt;host&gt;)</span></label>
+          <input type="text" name="socks_via_ssh" placeholder="remote-linux" />
+        </div>
+
+        <div class="field local-only">
+          <label>SOCKS Port <span class="dim">(local SOCKS5 port; default 1080)</span></label>
+          <input type="number" name="socks_port" min="1" max="65535" placeholder="1080" />
+        </div>
+
         <div class="field">
           <label>Working Dir</label>
           <input type="text" name="working_dir" placeholder="/home/user or D:/path" />

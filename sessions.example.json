@@ -31,6 +31,18 @@
       "claude_cmd": "",
       "claude_args": "",
       "description": "Plain shell on remote-task (for debugging)"
+    },
+    {
+      "id": "local-via-remote-net",
+      "name": "Local Claude via Remote Net",
+      "type": "local",
+      "socks_via_ssh": "remote-task",
+      "socks_port": "1080",
+      "working_dir": "D:/Users/me",
+      "pre_command": "",
+      "claude_cmd": "claude",
+      "claude_args": "",
+      "description": "Claude runs on Windows; outbound HTTP(S) exits from remote-task via ssh -D"
     }
   ]
 }

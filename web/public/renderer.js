@@ -507,9 +507,9 @@ function openEditor(sessionId) {
   const values = session || {
     name: '', type: 'local', ssh_host: '', port_forwards: '', working_dir: '',
     pre_command: '', claude_cmd: '', claude_args: '', description: '',
-    persistent: false, url: '',
+    persistent: false, url: '', socks_via_ssh: '', socks_port: '',
   };
-  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'url']) {
+  for (const key of ['name', 'ssh_host', 'port_forwards', 'working_dir', 'pre_command', 'claude_cmd', 'claude_args', 'description', 'url', 'socks_via_ssh', 'socks_port']) {
     const input = form.elements[key];
     if (input) input.value = values[key] || '';
   }
@@ -533,6 +533,7 @@ function updateTypeVisibility() {
   const t = checked && checked.value;
   document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', t !== 'ssh'));
   document.querySelectorAll('.web-only').forEach((el) => el.classList.toggle('hidden', t !== 'web'));
+  document.querySelectorAll('.local-only').forEach((el) => el.classList.toggle('hidden', t !== 'local'));
   document.querySelectorAll('.not-web').forEach((el) => el.classList.toggle('hidden', t === 'web'));
 }
 
@@ -554,6 +555,8 @@ function saveEditor(e) {
     description: (data.get('description') || '').toString(),
     persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
     url: (data.get('url') || '').toString().trim(),
+    socks_via_ssh: (data.get('socks_via_ssh') || '').toString().trim(),
+    socks_port: (data.get('socks_port') || '').toString().trim(),
   };
   if (payload.type === 'ssh' && !payload.ssh_host) {
     notify('SSH host is required for SSH sessions', 'error'); return;
@@ -679,8 +682,11 @@ function launchWebSession(session) {
 
   const iframe = document.createElement('iframe');
   iframe.className = 'web-iframe';
-  // Cache-busting `?t=...` not strictly needed; the proxy is stateless.
-  iframe.src = `/p/${encodeURIComponent(session.id)}/`;
+  // ?port= helps clients like xpra's HTML5 viewer that otherwise read
+  // window.location.port (empty on default 80/443) and fall back to a
+  // hardcoded internal port. Harmless query param for non-xpra targets.
+  const proxyPort = location.port || (location.protocol === 'https:' ? 443 : 80);
+  iframe.src = `/p/${encodeURIComponent(session.id)}/?port=${proxyPort}`;
   iframe.referrerPolicy = 'no-referrer';
   container.appendChild(iframe);
 

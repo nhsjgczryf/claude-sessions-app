@@ -34,6 +34,7 @@ const {
   scpUpload,
   saveImageToTemp,
 } = require('../lib/session-runtime');
+const { acquireTunnel } = require('../lib/socks-tunnel');
 
 const auth = require('../lib/auth');
 
@@ -365,40 +366,76 @@ wss.on('connection', (ws) => {
   ws.on('pong', heartbeat);
   const terms = new Map();
 
-  ws.on('message', (raw) => {
+  // Same env-injection logic as the Electron path (main.js#makeSocksProxyEnv).
+  function makeSocksProxyEnv(tunnel) {
+    const http = `http://127.0.0.1:${tunnel.bridgePort}`;
+    const socks = `socks5h://127.0.0.1:${tunnel.socksPort}`;
+    return {
+      HTTP_PROXY: http, HTTPS_PROXY: http,
+      http_proxy: http, https_proxy: http,
+      ALL_PROXY: socks, all_proxy: socks,
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+      no_proxy: 'localhost,127.0.0.1,::1',
+    };
+  }
+
+  // Spawn a PTY for the given session, awaiting an SSH SOCKS tunnel first
+  // if this is a local session that opted into one. Returns
+  // `{ pty, releaseTunnel }` so the caller can release on PTY exit.
+  async function spawnSessionPty(session, cols, rows) {
+    const cwd =
+      session.type === 'local'
+        ? session.working_dir && fs.existsSync(session.working_dir)
+          ? session.working_dir
+          : os.homedir()
+        : os.homedir();
+    const shell = process.platform === 'win32'
+      ? 'powershell.exe'
+      : (process.env.SHELL || 'bash');
+    const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
+
+    let env = { ...process.env };
+    let releaseTunnel = null;
+    const socksHost = session.type === 'local' && (session.socks_via_ssh || '').trim();
+    if (socksHost) {
+      const port = parseInt(session.socks_port, 10) || 1080;
+      const tun = await acquireTunnel(socksHost, port);
+      env = { ...env, ...makeSocksProxyEnv(tun) };
+      releaseTunnel = () => tun.release();
+    }
+
+    const term = pty.spawn(shell, shellArgs, {
+      name: 'xterm-256color',
+      cols: cols || 120,
+      rows: rows || 30,
+      cwd,
+      env,
+      useConpty: process.platform === 'win32',
+    });
+    return { pty: term, releaseTunnel };
+  }
+
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
 
     if (msg.type === 'create') {
       const { tabId, session, cols, rows } = msg;
-      const cwd =
-        session.type === 'local'
-          ? session.working_dir && fs.existsSync(session.working_dir)
-            ? session.working_dir
-            : os.homedir()
-          : os.homedir();
-
-      const shell = process.platform === 'win32'
-        ? 'powershell.exe'
-        : (process.env.SHELL || 'bash');
-      const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
-
-      let term;
+      let term, releaseTunnel;
       try {
-        term = pty.spawn(shell, shellArgs, {
-          name: 'xterm-256color',
-          cols: cols || 120,
-          rows: rows || 30,
-          cwd,
-          env: { ...process.env },
-          useConpty: process.platform === 'win32',
-        });
+        ({ pty: term, releaseTunnel } = await spawnSessionPty(session, cols, rows));
       } catch (err) {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
       }
+      // Client may have closed/killed during the tunnel await — bail.
+      if (ws.readyState !== ws.OPEN) {
+        try { term.kill(); } catch (_) {}
+        if (releaseTunnel) { try { releaseTunnel(); } catch (_) {} }
+        return;
+      }
 
-      const entry = { pty: term, session, exited: false };
+      const entry = { pty: term, session, releaseTunnel, exited: false };
       terms.set(tabId, entry);
       attachTermHandlers(tabId, entry);
       sendStartupForSession(term, session);
@@ -415,35 +452,23 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'error', tabId, error: 'no exited terminal for this tab' });
         return;
       }
-      const session = entry.session;
-      const cwd =
-        session.type === 'local'
-          ? session.working_dir && fs.existsSync(session.working_dir)
-            ? session.working_dir
-            : os.homedir()
-          : os.homedir();
-      const shell = process.platform === 'win32'
-        ? 'powershell.exe'
-        : (process.env.SHELL || 'bash');
-      const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
-      let term;
+      let term, releaseTunnel;
       try {
-        term = pty.spawn(shell, shellArgs, {
-          name: 'xterm-256color',
-          cols: cols || 120,
-          rows: rows || 30,
-          cwd,
-          env: { ...process.env },
-          useConpty: process.platform === 'win32',
-        });
+        ({ pty: term, releaseTunnel } = await spawnSessionPty(entry.session, cols, rows));
       } catch (err) {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
       }
+      if (ws.readyState !== ws.OPEN) {
+        try { term.kill(); } catch (_) {}
+        if (releaseTunnel) { try { releaseTunnel(); } catch (_) {} }
+        return;
+      }
       entry.pty = term;
+      entry.releaseTunnel = releaseTunnel;
       entry.exited = false;
       attachTermHandlers(tabId, entry);
-      sendStartupForSession(term, session);
+      sendStartupForSession(term, entry.session);
       send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'input') {
       const e = terms.get(msg.tabId);
@@ -455,6 +480,7 @@ wss.on('connection', (ws) => {
       const e = terms.get(msg.tabId);
       if (e) {
         if (e.pty) { try { e.pty.kill(); } catch (_) {} }
+        if (e.releaseTunnel) { try { e.releaseTunnel(); } catch (_) {} }
         terms.delete(msg.tabId);
       }
     }
@@ -469,6 +495,12 @@ wss.on('connection', (ws) => {
       const cur = terms.get(tabId);
       // Stale exit (entry was already replaced or removed) — ignore.
       if (!cur || cur.pty !== term) return;
+      // Tunnel belongs to this PTY's env; release before the user gets a
+      // chance to hit R, so the reconnect spawns a fresh one.
+      if (cur.releaseTunnel) {
+        try { cur.releaseTunnel(); } catch (_) {}
+        cur.releaseTunnel = null;
+      }
       cur.pty = null;
       cur.exited = true;
       cur.lastExitCode = exitCode;
@@ -494,6 +526,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     for (const e of terms.values()) {
       if (e && e.pty) { try { e.pty.kill(); } catch (_) {} }
+      if (e && e.releaseTunnel) { try { e.releaseTunnel(); } catch (_) {} }
     }
     terms.clear();
   });
