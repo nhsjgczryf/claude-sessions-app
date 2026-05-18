@@ -1,0 +1,19 @@
+{
+  "name": "Claude Sessions",
+  "short_name": "Claude",
+  "description": "Manage Claude Code terminal sessions (local + SSH) and embedded web tabs.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1e1e2e",
+  "theme_color": "#1e1e2e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

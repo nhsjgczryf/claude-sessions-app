@@ -647,7 +647,11 @@ function launchSession(sessionId) {
   };
   tabs.push(tab);
 
-  term.onData((data) => { if (tab.alive) wsSend({ type: 'input', tabId, data }); });
+  term.onData((data) => {
+    if (!tab.alive) return;
+    const out = applyCtrlIfArmed(data);
+    wsSend({ type: 'input', tabId, data: out });
+  });
   term.onResize(({ cols, rows }) => { if (tab.alive) wsSend({ type: 'resize', tabId, cols, rows }); });
 
   attachKeyboardHandlers(tab);
@@ -713,6 +717,7 @@ function switchToTab(tabId) {
   activeTabId = tabId;
   for (const t of tabs) t.container.classList.toggle('active', t.id === tabId);
   const tab = tabs.find((t) => t.id === tabId);
+  updateKeybarVisibility();
   if (tab && tab.kind === 'terminal') {
     try {
       tab.fitAddon.fit();
@@ -745,6 +750,7 @@ function closeTab(tabId) {
   $('#welcome').classList.toggle('hidden', tabs.length > 0);
   renderTabs();
   renderSessionList();
+  updateKeybarVisibility();
 }
 
 function renderTabs() {
@@ -1072,6 +1078,227 @@ function refitActiveTerminal() {
 
 $('#btn-collapse').addEventListener('click', () => setSidebarCollapsed(true));
 $('#btn-expand').addEventListener('click', () => setSidebarCollapsed(false));
+
+// ============================================================================
+// PWA: service worker + install prompt
+// ============================================================================
+
+if ('serviceWorker' in navigator) {
+  // Register after the page is loaded so we don't compete for resources
+  // with the initial render.
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js')
+      .catch((err) => console.warn('[sw] registration failed:', err));
+  });
+}
+
+let _deferredInstall = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredInstall = e;
+  ensureInstallChip();
+});
+
+function ensureInstallChip() {
+  if (!_deferredInstall) return;
+  let chip = $('#install-chip');
+  if (!chip) {
+    chip = document.createElement('button');
+    chip.id = 'install-chip';
+    chip.type = 'button';
+    chip.textContent = 'Install app';
+    chip.addEventListener('click', async () => {
+      const ev = _deferredInstall;
+      if (!ev) return;
+      _deferredInstall = null;
+      chip.classList.add('hidden');
+      try {
+        ev.prompt();
+        await ev.userChoice;
+      } catch (_) {}
+    });
+    document.body.appendChild(chip);
+  } else {
+    chip.classList.remove('hidden');
+  }
+}
+
+window.addEventListener('appinstalled', () => {
+  _deferredInstall = null;
+  const chip = $('#install-chip');
+  if (chip) chip.classList.add('hidden');
+});
+
+// ============================================================================
+// Mobile keyboard bar
+// ============================================================================
+
+// "Primary input is touch" — hover: none + pointer: coarse. We
+// intentionally don't use `ontouchstart` alone because that's true on
+// Windows hybrid laptops with a mouse, where the keybar would be
+// annoying. Users can override by ?keybar=force or ?keybar=off.
+function isTouchDevice() {
+  const q = new URLSearchParams(location.search);
+  if (q.get('keybar') === 'force') return true;
+  if (q.get('keybar') === 'off') return false;
+  return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+}
+
+let ctrlArmed = false;
+
+function setCtrlArmed(armed) {
+  ctrlArmed = !!armed;
+  const btn = document.querySelector('#keybar button[data-keybar="mod:ctrl"]');
+  if (btn) btn.classList.toggle('armed', ctrlArmed);
+}
+
+// Transform the data the user just typed/pasted if Ctrl is armed.
+// Returns the (possibly transformed) bytes. Disarms Ctrl after one use.
+function applyCtrlIfArmed(data) {
+  if (!ctrlArmed) return data;
+  if (data && data.length === 1) {
+    const c = data.charCodeAt(0);
+    // Ctrl maps printable ASCII (@ A-Z [ \ ] ^ _ ` a-z { | } ~) to bytes
+    // 0–31 by clearing the high three bits. Match what physical Ctrl
+    // would have produced.
+    if (c >= 0x40 && c <= 0x7E) {
+      setCtrlArmed(false);
+      return String.fromCharCode(c & 0x1F);
+    }
+  }
+  // Anything that can't be Ctrl-modified just goes through unchanged
+  // and we disarm so the user doesn't get stuck in armed state.
+  setCtrlArmed(false);
+  return data;
+}
+
+function keybarBytesFor(action) {
+  const idx = action.indexOf(':');
+  const kind = action.slice(0, idx);
+  const val = action.slice(idx + 1);
+  if (kind === 'key') {
+    switch (val) {
+      case 'Tab':         return '\t';
+      case 'Escape':      return '\x1b';
+      case 'ArrowUp':     return '\x1b[A';
+      case 'ArrowDown':   return '\x1b[B';
+      case 'ArrowRight':  return '\x1b[C';
+      case 'ArrowLeft':   return '\x1b[D';
+      case 'Home':        return '\x1b[H';
+      case 'End':         return '\x1b[F';
+      case 'PageUp':      return '\x1b[5~';
+      case 'PageDown':    return '\x1b[6~';
+    }
+  } else if (kind === 'ctrl') {
+    if (val && val.length === 1) {
+      const c = val.toUpperCase().charCodeAt(0);
+      if (c >= 0x40 && c <= 0x7E) return String.fromCharCode(c & 0x1F);
+    }
+  } else if (kind === 'char') {
+    return val;
+  }
+  return null;
+}
+
+(function wireKeybar() {
+  const bar = $('#keybar');
+  if (!bar) return;
+
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-keybar]');
+    if (!btn) return;
+    const action = btn.dataset.keybar;
+
+    if (action === 'mod:ctrl') {
+      setCtrlArmed(!ctrlArmed);
+      return;
+    }
+
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (!tab || tab.kind !== 'terminal' || !tab.alive) return;
+
+    let bytes = keybarBytesFor(action);
+    if (bytes == null) return;
+
+    // Special keys / preset ^X disarm Ctrl without applying it (those
+    // are already the desired raw sequence). Only typed chars get
+    // ctrl-modified.
+    if (action.startsWith('char:')) bytes = applyCtrlIfArmed(bytes);
+    else if (ctrlArmed) setCtrlArmed(false);
+
+    wsSend({ type: 'input', tabId: tab.id, data: bytes });
+    try { tab.term.focus(); } catch (_) {}
+  });
+})();
+
+function updateKeybarVisibility() {
+  const tab = tabs.find((t) => t.id === activeTabId);
+  const show = isTouchDevice() && !!tab && tab.kind === 'terminal';
+  const bar = $('#keybar');
+  if (!bar) return;
+  const wasHidden = bar.classList.contains('hidden');
+  bar.classList.toggle('hidden', !show);
+  if (wasHidden !== !show) {
+    // Height of #terminal-area just changed — re-fit so xterm doesn't
+    // sit under the keybar.
+    setTimeout(refitActiveTerminal, 50);
+  }
+}
+
+// ============================================================================
+// Gallery / file picker for images (touch-first path for /api/paste-image)
+// ============================================================================
+
+(function wireImagePicker() {
+  const fileInput = $('#image-file-input');
+  if (!fileInput) return;
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || !activeTabId) return;
+    await uploadImageFile(activeTabId, file);
+  });
+})();
+
+function pickImageFromGallery() {
+  if (!activeTabId) { notify('No active terminal', 'error'); return; }
+  $('#image-file-input').click();
+}
+
+// Replace the desktop-only handler installed earlier in this file
+// with a touch-aware one: on phones/tablets we go straight to the
+// gallery picker (Android's Clipboard image API is unreliable); on
+// desktop we try the clipboard first.
+(function rewireImgButton() {
+  const btn = $('#btn-paste-img');
+  if (!btn) return;
+  const fresh = btn.cloneNode(true);
+  btn.replaceWith(fresh);
+  fresh.title = isTouchDevice() ? 'Pick image from gallery' : 'Paste clipboard image';
+  fresh.addEventListener('click', async () => {
+    if (isTouchDevice()) {
+      pickImageFromGallery();
+      return;
+    }
+    // Desktop: try clipboard first; if nothing usable, fall back to picker.
+    if (!activeTabId) { notify('No active terminal', 'error'); return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const type = item.types.find((t) => t.startsWith('image/'));
+          if (type) {
+            const blob = await item.getType(type);
+            await uploadImageFile(activeTabId, blob);
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+    pickImageFromGallery();
+  });
+})();
 
 // Boot
 attemptStart();

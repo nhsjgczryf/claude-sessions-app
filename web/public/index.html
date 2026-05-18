@@ -2,9 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#1e1e2e" />
-  <title>Claude Sessions (Web)</title>
+  <title>Claude Sessions</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Claude" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
   <link rel="stylesheet" href="/vendor/xterm/xterm/css/xterm.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/xterm/xterm/lib/xterm.js"></script>
@@ -43,7 +53,39 @@
         <p class="hint">Ctrl+N new · Ctrl+W close · Ctrl+Tab switch</p>
       </div>
     </div>
+    <div id="keybar" class="hidden" aria-hidden="true">
+      <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
+      <button type="button" data-keybar="key:Tab" title="Tab">Tab</button>
+      <button type="button" data-keybar="key:Escape" title="Esc">Esc</button>
+      <button type="button" data-keybar="key:ArrowUp" title="Up">↑</button>
+      <button type="button" data-keybar="key:ArrowDown" title="Down">↓</button>
+      <button type="button" data-keybar="key:ArrowLeft" title="Left">←</button>
+      <button type="button" data-keybar="key:ArrowRight" title="Right">→</button>
+      <button type="button" data-keybar="key:Home" title="Home">Hm</button>
+      <button type="button" data-keybar="key:End" title="End">End</button>
+      <button type="button" data-keybar="ctrl:c" title="Ctrl+C — interrupt">^C</button>
+      <button type="button" data-keybar="ctrl:d" title="Ctrl+D — EOF / exit">^D</button>
+      <button type="button" data-keybar="ctrl:z" title="Ctrl+Z — suspend">^Z</button>
+      <button type="button" data-keybar="ctrl:l" title="Ctrl+L — clear">^L</button>
+      <button type="button" data-keybar="ctrl:r" title="Ctrl+R — search history">^R</button>
+      <button type="button" data-keybar="char:|">|</button>
+      <button type="button" data-keybar="char:/">/</button>
+      <button type="button" data-keybar="char:\">\</button>
+      <button type="button" data-keybar="char:~">~</button>
+      <button type="button" data-keybar="char:-">-</button>
+      <button type="button" data-keybar="char:_">_</button>
+      <button type="button" data-keybar="char:&gt;">&gt;</button>
+      <button type="button" data-keybar="char:&lt;">&lt;</button>
+      <button type="button" data-keybar="char:&amp;">&amp;</button>
+      <button type="button" data-keybar="char:;">;</button>
+      <button type="button" data-keybar="char:'">'</button>
+      <button type="button" data-keybar='char:"'>"</button>
+    </div>
   </div>
+
+  <!-- Hidden file input for "pick from gallery / files" image paste.
+       The label of #btn-paste-img acts as the trigger on touch devices. -->
+  <input id="image-file-input" type="file" accept="image/*" hidden />
 
   <div id="modal-overlay" class="hidden">
     <div id="session-editor">

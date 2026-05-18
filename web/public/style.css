@@ -726,3 +726,74 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   html, body { user-select: none; -webkit-user-select: none; }
   .terminal-container, .terminal-container * { user-select: text; -webkit-user-select: text; }
 }
+
+/* =========================================== Mobile keyboard bar
+ * A row of touch-friendly buttons that inject the keys a soft-keyboard
+ * can't reach (Tab, Esc, arrows, Ctrl combos, common shell punctuation).
+ * Lives in the flexbox column inside #main so its height is taken out
+ * of #terminal-area automatically — xterm's fitAddon picks up the new
+ * size on next fit() call. */
+#keybar {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 4px;
+  padding: 4px 6px;
+  /* Leave room for system gesture bars / iPhone home indicator. */
+  padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  scrollbar-width: thin;
+  touch-action: pan-x;
+  /* Suppress the white "tap highlight" overlay on iOS Safari */
+  -webkit-tap-highlight-color: transparent;
+}
+#keybar.hidden { display: none; }
+#keybar button {
+  flex: 0 0 auto;
+  min-width: 38px;
+  min-height: 32px;
+  padding: 4px 10px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--input-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* Prevent text-selection ghost on long-press */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+#keybar button:active { background: var(--bg-selected); }
+#keybar button.armed {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* PWA install hint chip — shows up bottom-right when the browser fires
+ * beforeinstallprompt. Clicking it triggers the prompt. */
+#install-chip {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 600;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 999px;
+  border: none;
+  font-weight: 600;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+#install-chip.hidden { display: none; }
+@media (max-width: 600px) {
+  #install-chip { bottom: calc(env(safe-area-inset-bottom, 0px) + 48px); }
+}

@@ -197,15 +197,37 @@ app.post('/api/sessions', (req, res) => {
   }
 });
 
+// Accepts any base64-encoded image dataUrl (image/png from the clipboard,
+// image/jpeg or image/heic from a phone gallery picker, etc.). Saves to
+// /tmp/claude-clipboard/clip_<ts>.<ext>. Same response shape regardless
+// of source type so the renderer doesn't care.
+const MIME_TO_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/bmp': 'bmp',
+};
+
 app.post('/api/paste-image', (req, res) => {
   try {
     const dataUrl = req.body && req.body.dataUrl;
-    if (!dataUrl || !/^data:image\/png;base64,/.test(dataUrl)) {
-      return res.status(400).json({ ok: false, error: 'expected dataUrl image/png base64' });
+    const m = /^data:(image\/[A-Za-z0-9.+-]+);base64,(.*)$/i.exec(dataUrl || '');
+    if (!m) {
+      return res.status(400).json({ ok: false, error: 'expected base64 image dataUrl' });
     }
-    const buf = Buffer.from(dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64');
-    const localPath = saveImageToTemp(buf);
-    res.json({ ok: true, localPath });
+    const mime = m[1].toLowerCase();
+    const ext = MIME_TO_EXT[mime] || mime.split('/')[1].replace(/[^a-z0-9]/g, '') || 'bin';
+    const buf = Buffer.from(m[2], 'base64');
+    const MAX = 25 * 1024 * 1024;
+    if (buf.length > MAX) {
+      return res.status(413).json({ ok: false, error: 'image too large (>25MB)' });
+    }
+    const localPath = saveImageToTemp(buf, ext);
+    res.json({ ok: true, localPath, mime });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err && err.message || err) });
   }
