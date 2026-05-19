@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Overrides Capacitor's bundled bridge_layout_main.xml so the
+   bridge's WebView is our ClaudeSessionsWebView subclass instead of
+   a stock android.webkit.WebView. Android's resource overlay picks
+   the app-module copy over the library copy when both exist with
+   the same name.
+
+   Capacitor finds the WebView by @+id/webview, so as long as the ID
+   matches and the class is a WebView subclass, the bridge wires up
+   normally. The custom subclass only overrides onCreateInputConnection
+   to wrap incoming IME input with TerminalInputConnection — see
+   TerminalInputConnection.kt for the reason this is needed.
+-->
+<app.claudesessions.android.ClaudeSessionsWebView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/webview"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_gravity="center" />

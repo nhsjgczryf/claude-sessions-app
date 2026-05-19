@@ -56,6 +56,13 @@
       if (!SHELL) { notSupported('close'); return; }
       return SHELL.close({ tabId });
     },
+    // Tell native which local-shell tab is currently focused so the
+    // ClaudeSessionsWebView InputConnection wrapper can route OS-level
+    // IME input straight into its PTY. Pass tabId=null to deactivate.
+    async setActiveTab(tabId) {
+      if (!SHELL) return;
+      return SHELL.setActiveTab({ tabId: tabId == null ? null : tabId });
+    },
 
     onData(cb) { dataListeners.add(cb); return () => dataListeners.delete(cb); },
     onExit(cb) { exitListeners.add(cb); return () => exitListeners.delete(cb); },

@@ -332,6 +332,36 @@ class SshPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * JS notifies us when an SSH tab becomes the active focus (or
+     * stops being so). When active, register a sender closure with
+     * InputRouter so the WebView's native InputConnection wrapper can
+     * stream IME-composed text straight into this tab's SSH session
+     * outputStream. Passing tabId=null tears down the registration.
+     */
+    @PluginMethod
+    fun setActiveTab(call: PluginCall) {
+        val tabId = call.getString("tabId")
+        if (tabId == null) {
+            InputRouter.clearIfOwnedBy("ssh")
+            call.resolve()
+            return
+        }
+        val entry = sessions[tabId] ?: return call.reject("no such tab: $tabId")
+        InputRouter.set("ssh") { text ->
+            try {
+                val out: OutputStream = entry.shell.outputStream
+                val bytes = text.toByteArray(StandardCharsets.UTF_8)
+                out.write(bytes)
+                out.flush()
+            } catch (e: Exception) {
+                android.util.Log.w("SshPlugin",
+                    "active-tab write to $tabId failed: ${e.message}")
+            }
+        }
+        call.resolve()
+    }
+
     // ------------------------------------------------------------ SFTP
 
     /**

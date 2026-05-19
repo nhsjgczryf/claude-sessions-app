@@ -175,6 +175,36 @@ class LocalShellPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * JS notifies us when a local-shell tab becomes the active focus
+     * (or stops being so). When active, we register a sender closure
+     * with InputRouter so the WebView's native InputConnection wrapper
+     * can stream IME-composed text straight into this tab's PTY,
+     * bypassing the broken xterm.js textarea route. Passing tabId=null
+     * tears down the registration (typically: editor modal opened,
+     * other plugin's tab became active, or no tab selected).
+     */
+    @PluginMethod
+    fun setActiveTab(call: PluginCall) {
+        val tabId = call.getString("tabId")
+        if (tabId == null) {
+            InputRouter.clearIfOwnedBy("local")
+            call.resolve()
+            return
+        }
+        val entry = sessions[tabId] ?: return call.reject("no such tab: $tabId")
+        InputRouter.set("local") { text ->
+            try {
+                val bytes = text.toByteArray(StandardCharsets.UTF_8)
+                Pty.writePty(entry.masterFd, bytes, 0, bytes.size)
+            } catch (e: Exception) {
+                android.util.Log.w("LocalShellPlugin",
+                    "active-tab write to ${entry.tabId} failed: ${e.message}")
+            }
+        }
+        call.resolve()
+    }
+
     // -----------------------------------------------------------------
     // Reader thread — drains the PTY, emits data/exit events
     // -----------------------------------------------------------------

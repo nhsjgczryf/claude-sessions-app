@@ -98,6 +98,7 @@ function copyNativeSources() {
     copyIfChanged(path.join(NATIVE, file), path.join(dst, file));
   }
   copyJniSources();
+  copyResources();
   patchMainActivity(dst);
 }
 
@@ -111,6 +112,31 @@ function copyJniSources() {
   fs.mkdirSync(dstDir, { recursive: true });
   for (const file of fs.readdirSync(srcDir)) {
     copyIfChanged(path.join(srcDir, file), path.join(dstDir, file));
+  }
+}
+
+// Android resource overlay. Anything we place under
+// android-native/res/<resType>/<filename> overrides Capacitor's
+// bundled version of the same resource at build time.
+//
+// Currently used for layout/bridge_layout_main.xml: that file makes
+// the bridge's WebView a ClaudeSessionsWebView subclass so the
+// custom InputConnection wrapper can intercept IME input. The bug
+// it works around — Android WebView silently dropping IME composition
+// events on xterm.js's hidden textarea — is documented in detail in
+// android-native/TerminalInputConnection.kt.
+function copyResources() {
+  const srcRoot = path.join(NATIVE, 'res');
+  if (!fs.existsSync(srcRoot)) return;
+  const dstRoot = path.join(ANDROID, 'app', 'src', 'main', 'res');
+  for (const resType of fs.readdirSync(srcRoot)) {
+    const srcDir = path.join(srcRoot, resType);
+    const dstDir = path.join(dstRoot, resType);
+    if (!fs.statSync(srcDir).isDirectory()) continue;
+    fs.mkdirSync(dstDir, { recursive: true });
+    for (const file of fs.readdirSync(srcDir)) {
+      copyIfChanged(path.join(srcDir, file), path.join(dstDir, file));
+    }
   }
 }
 

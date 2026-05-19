@@ -79,6 +79,15 @@
       return SSH.close({ tabId });
     },
 
+    // Tell native which SSH tab is currently focused so the
+    // ClaudeSessionsWebView InputConnection wrapper can route OS-level
+    // IME input straight into its sshj outputStream. Pass tabId=null
+    // to deactivate (editor modal opened, other tab kind activated).
+    async setActiveTab(tabId) {
+      if (!SSH) return;
+      return SSH.setActiveTab({ tabId: tabId == null ? null : tabId });
+    },
+
     async sftpPut(tabId, remotePath, blob) {
       if (!SSH) { notSupported('sftpPut'); return; }
       const dataBase64 = await blobToBase64(blob);

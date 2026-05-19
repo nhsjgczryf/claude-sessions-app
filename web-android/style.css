@@ -920,112 +920,18 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 
 /* ============================================================
- * Android WebView IME workaround for xterm.js helper-textarea
+ * xterm.js helper-textarea — left at the library defaults.
  *
- * xterm.js parks its hidden helper-textarea at `left: -9999em;
- * width: 0; height: 0; padding: 0` so the cursor stays focused
- * without the textarea visible. Chrome desktop / mobile Chrome /
- * Firefox dispatch IME composition events to it just fine.
- * Android WebView does NOT — IMEs (QQ Pinyin, Sogou, Gboard
- * Chinese, Rime, Baidu) check whether the textarea is "available"
- * for composition by measuring  width + padding-left + padding-
- * right + border-left + border-right.  If that total is 0, they
- * decide the textarea isn't a real input and silently refuse to
- * fire compositionstart/update/end on it. Typing Chinese then
- * appears to commit (the candidate popup closes) but no event
- * reaches the DOM, term.onData never fires, and the PTY sees
- * nothing.
+ * Earlier we tried to make the hidden textarea on-screen with
+ * non-zero padding so Android WebView's IME would attach to it.
+ * That whole approach is now obsolete — the APK ships a custom
+ * WebView (ClaudeSessionsWebView.kt) that intercepts IME input at
+ * the InputConnection layer, bypassing the textarea entirely.
+ * See TerminalInputConnection.kt for the full story.
  *
- * Reference: xterm.js PR #3251 fixed this for QQ Pinyin + Rime
- * by ensuring the textarea has non-zero bounding-box size. The
- * fix landed in CompositionHelper.ts (Math.max(width,1)) but
- * only DURING active composition; for the IME's INITIAL "is
- * this textarea worth attaching to?" probe, the CSS default
- * still has size 0. We force a non-zero default here.
- *
- * Symptom checklist this addresses:
- *   - Typing Chinese in plain bash → no chars appear
- *   - IME candidate popup positioned weirdly (top-left of screen)
- *   - All other browsers and clients work; only the APK breaks
- *
- * What changed and why:
- *   left: 0; top: 0        — bring on-screen for WebView's
- *                            visibility heuristic.
- *   width: 1ch !important  — non-zero so IME thinks it's a real
- *   height: 1em            input. !important so xterm.css's
- *                            `width: 0` can't put it back.
- *   padding: 0 1px         — width-budget contribution; the IME
- *                            availability check sums this in.
- *                            Vertical padding stays 0 so the
- *                            tiny invisible textarea doesn't
- *                            push terminal content down a pixel.
- *   min-width: 1px         — belt-and-suspenders for the same
- *                            availability check.
- *   opacity: 0             — keep it invisible.
- *   z-index: -5            — sit behind the canvas so it can't
- *                            block touches; combined with the
- *                            terminal renderer being on top this
- *                            is enough — we deliberately do NOT
- *                            set pointer-events: none, since
- *                            Android WebView's IME has been
- *                            observed to skip InputConnection
- *                            attachment for elements marked as
- *                            non-interactive.
- *
- * No !important on left/top: xterm.js v6's CompositionHelper
- * sets those inline during active composition to anchor the IME
- * candidate popup at the cursor, and we want that path to win.
+ * If you're reverting back to the DOM-event path for any reason,
+ * the CSS recipe that has worked for some IMEs was:
+ *   left: 0; top: 0;
+ *   width: 1ch; height: 1em; min-width: 1px;
+ *   padding: 0 1px; border: 0; opacity: 0; z-index: -5;
  */
-.xterm-helper-textarea {
-  left: 0;
-  top: 0;
-  width: 1ch !important;
-  height: 1em !important;
-  min-width: 1px !important;
-  min-height: 1px !important;
-  padding: 0 1px !important;
-  border: 0 !important;
-  opacity: 0 !important;
-  z-index: -5 !important;
-}
-
-/* ============================================================
- * Mobile composition input bar
- *
- * Visible <input> field that sits between the terminal canvas and
- * the keybar on touch devices. Everything the user types here gets
- * streamed to the active tab's PTY:
- *   - each `input` event (ASCII typing, word predictions): forwarded
- *     as raw text, then the input value is cleared.
- *   - `compositionend` events (Chinese / Japanese / Korean IME):
- *     forwarded as the committed text, value cleared.
- *   - Enter: sends '\r' so shell commands actually execute.
- *
- * This bar exists because xterm.js's hidden helper-textarea (used by
- * the renderer's onData path) is unreliable on Android WebView for
- * anything that goes through an InputConnection composition — which
- * is basically all IME input AND Gboard-style predictive typing.
- * Routing text through a normal visible input sidesteps the entire
- * bug class. Hardware-keyboard users still get xterm's textarea
- * path via the existing focus + keydown listeners. */
-#mobile-input-bar {
-  flex-shrink: 0;
-  display: flex;
-  padding: 4px 8px;
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
-  padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
-}
-#mobile-input-bar.hidden { display: none; }
-#mobile-input {
-  flex: 1;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 12px;
-  font-size: 14px;
-  font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
-  outline: none;
-}
-#mobile-input:focus { border-color: var(--accent); }
