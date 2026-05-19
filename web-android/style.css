@@ -774,6 +774,46 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 
   html, body { user-select: none; -webkit-user-select: none; }
   .terminal-container, .terminal-container * { user-select: text; -webkit-user-select: text; }
+
+  /* Bigger touch targets on mobile. The base styles size buttons
+   * for a precise mouse cursor (.icon-btn at 11px font / 2px padding
+   * is ~16x12 actual pixels — basically untappable). Bump to >=44px
+   * across the board for the chrome (sidebar header buttons, tab
+   * bar, tab close-X) so taps actually register.
+   */
+  .icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 16px;
+    padding: 8px;
+  }
+  .sidebar-actions button {
+    min-height: 40px;
+    font-size: 13px;
+  }
+  .tab {
+    height: 44px;
+    min-width: 110px;
+    max-width: 180px;
+    padding: 0 14px;
+  }
+  .tab-close {
+    width: 32px;
+    height: 32px;
+    line-height: 30px;
+    font-size: 20px;
+  }
+  .session-actions button {
+    min-height: 36px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  /* HTML5 drag-and-drop interferes with click handling on some
+   * Android WebView builds — a tap on a draggable element gets
+   * swallowed waiting for a possible drag gesture. Disable
+   * draggable visually here too as a safety net (renderer.js also
+   * skips setting draggable=true on touch devices). */
+  .tab, .session-card { -webkit-touch-callout: none; }
 }
 
 /* =========================================== Mobile keyboard bar

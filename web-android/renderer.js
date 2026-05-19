@@ -138,7 +138,11 @@ function renderSessionList() {
     card.className = 'session-card';
     if (s.id === selectedSessionId) card.classList.add('selected');
     card.dataset.id = s.id;
-    card.draggable = true;
+    // HTML5 drag on Android WebView can swallow taps while it waits
+    // for a long-press to begin a drag. Touch users reorder rarely
+    // (and can use long-press → drag if we add it later); for now
+    // prefer reliable taps over drag.
+    card.draggable = !isTouchDevice();
     const count = sessionInstanceCount(s.id);
     card.innerHTML = `
       <div class="session-card-top">
@@ -647,7 +651,9 @@ function renderTabs() {
   for (const t of tabs) {
     const div = document.createElement('div');
     div.className = 'tab' + (t.id === activeTabId ? ' active' : '') + (t.alive ? '' : ' dead');
-    div.draggable = true;
+    // Skip draggable on touch (see comment in renderSessionList) —
+    // Android WebView's drag-vs-tap arbitration eats short taps.
+    div.draggable = !isTouchDevice();
     div.dataset.tabId = t.id;
     div.innerHTML = `
       <span class="tab-status"></span>
@@ -862,30 +868,62 @@ function isTouchDevice() {
   return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 }
 
-// Android soft keyboards (Gboard, Sogou, etc.) don't fire reliable
-// keydown/keyup events for Backspace inside a WebView — they emit
-// 'beforeinput' / 'input' with inputType === 'deleteContentBackward'
-// instead. xterm.js's hidden textarea hears those events but doesn't
-// translate the deletion to a 0x7f over its onData channel, so the
-// user types into the terminal and Backspace silently does nothing
-// (only working after they tap into a non-xterm input first because
-// that one DOES respect the deletion event).
+// Android soft keyboards (Gboard, Sogou, Chinese IMEs) and even some
+// hardware-keyboard drivers don't fire reliable keydown events for
+// Backspace inside a WebView. Two related symptoms we've seen:
+//   - Single tap on Backspace inside xterm: deletes nothing.
+//   - Holding Backspace: deletes only some of the characters (1 per
+//     2-3 presses) because keydown autorepeat is missing.
 //
-// Fix: hook the textarea's beforeinput in capture phase, forward
-// the deletion ourselves as a raw DEL byte, and preventDefault so
-// xterm doesn't process the empty-textarea-changed event.
+// xterm's hidden textarea is involved either way — depending on the
+// IME we get keydown OR beforeinput OR both. Listen to both, dedup
+// with a tiny window so a press that fires both events only sends
+// one DEL byte.
 function attachSoftKeyboardFix(tab) {
   const ta = tab.term && tab.term.textarea;
   if (!ta) return;
-  ta.addEventListener('beforeinput', (e) => {
+
+  let lastSent = 0;
+  const DEDUP_MS = 30;
+
+  function sendBackspace() {
     if (!tab.alive) return;
+    const now = Date.now();
+    if (now - lastSent < DEDUP_MS) return;
+    lastSent = now;
+    SshBridge.write(tab.id, '\x7f').catch(() => {});
+  }
+  function sendForwardDelete() {
+    if (!tab.alive) return;
+    const now = Date.now();
+    if (now - lastSent < DEDUP_MS) return;
+    lastSent = now;
+    SshBridge.write(tab.id, '\x1b[3~').catch(() => {});
+  }
+
+  // Path 1: hardware / mature keyboards fire keydown for Backspace.
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation();
+      sendBackspace();
+    } else if (e.key === 'Delete') {
+      e.preventDefault();
+      e.stopPropagation();
+      sendForwardDelete();
+    }
+  }, true);
+
+  // Path 2: Android soft keyboards fire beforeinput with these
+  // inputTypes instead of keydown. Same dedup applies.
+  ta.addEventListener('beforeinput', (e) => {
     const t = e.inputType;
     if (t === 'deleteContentBackward' || t === 'deleteWordBackward') {
       e.preventDefault();
-      SshBridge.write(tab.id, '\x7f').catch(() => {});
+      sendBackspace();
     } else if (t === 'deleteContentForward') {
       e.preventDefault();
-      SshBridge.write(tab.id, '\x1b[3~').catch(() => {});
+      sendForwardDelete();
     }
   }, true);
 }

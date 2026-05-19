@@ -94,10 +94,21 @@ class SshPlugin : Plugin() {
                 // UX than the threat model warrants on a personal
                 // sideloaded app.
                 client.addHostKeyVerifier(PromiscuousVerifier())
-                client.connectTimeout = 15_000
+                // 8s connect timeout: long enough for a roaming-LTE
+                // SYN to complete, short enough that a wrong host /
+                // closed port / dead VPN surfaces as a clear failure
+                // before the user wonders if the app is hung.
+                client.connectTimeout = 8_000
                 client.timeout = 60_000
                 emitStatus(tabId, "Connecting to $host:$port…")
-                client.connect(host, port)
+                try {
+                    client.connect(host, port)
+                } catch (e: Throwable) {
+                    throw RuntimeException(
+                        "TCP connect to $host:$port failed (${e.javaClass.simpleName}: ${e.message ?: "no message"})",
+                        e,
+                    )
+                }
 
                 // SSH-level keepalive. sshj sends a global-request ping
                 // every 30s; after a few missed responses the connection
