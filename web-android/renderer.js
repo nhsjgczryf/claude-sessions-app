@@ -529,6 +529,9 @@ async function launchSession(sessionId, opts) {
 
   term.onData((data) => {
     if (!tab.alive) return;
+    // If our compositionend handler just force-wrote this same text,
+    // drop the xterm.js-pathway duplicate. See attachSoftKeyboardFix.
+    if (tab._suppressOnData && tab._suppressOnData(data)) return;
     const out = applyCtrlIfArmed(data);
     // Inside a full-screen TUI (claude-code / vim / less in
     // alt-screen mode), IME-composed non-ASCII input (Chinese typed
@@ -1053,6 +1056,14 @@ function attachSoftKeyboardFix(tab) {
   const ta = tab.term && tab.term.textarea;
   if (!ta) return;
 
+  // Hint to the WebView that this textarea wants a standard text
+  // IME. Without this hint, some Android WebView builds skip the
+  // IME's composition wiring for elements they treat as non-text.
+  try {
+    ta.setAttribute('inputmode', 'text');
+    ta.setAttribute('enterkeyhint', 'send');
+  } catch (_) {}
+
   let lastSent = 0;
   const DEDUP_MS = 30;
 
@@ -1096,6 +1107,65 @@ function attachSoftKeyboardFix(tab) {
       sendForwardDelete();
     }
   }, true);
+
+  // Path 3: IME compositionend backup. xterm.js v6's
+  // CompositionHelper SHOULD pick this up and call onData, but
+  // Android WebView sometimes delivers compositionend in a way that
+  // xterm.js's handler misses (especially after we move the hidden
+  // textarea on-screen via the CSS workaround — xterm.js wasn't
+  // designed around the textarea being visible). To make Chinese
+  // input reliable, we ALSO listen here in the capture phase and
+  // force-send the composed text via the bridge. To avoid
+  // double-input on platforms where xterm.js's path DOES fire, we
+  // record the text + timestamp, and suppress duplicate onData calls
+  // for the same text within a tight window.
+  const recentComposed = { text: '', at: 0 };
+  ta.addEventListener('compositionend', (e) => {
+    if (!tab.alive) return;
+    const text = e.data || '';
+    if (!text) return;
+    // Only force-write when composed text contains non-ASCII (IME)
+    // chars — ASCII falls through to term.onData naturally.
+    // recentComposed is only stamped INSIDE this branch, so an
+    // ASCII composition doesn't cause us to suppress xterm.js's
+    // legitimate write.
+    if (/[^\x00-\x7F]/.test(text)) {
+      bridgeFor(tab).write(tab.id, text).catch(() => {});
+      recentComposed.text = text;
+      recentComposed.at = Date.now();
+    }
+  }, true);
+  // Belt-and-suspenders: some Android IMEs deliver committed text
+  // via `input` (inputType=insertCompositionText / insertText)
+  // WITHOUT firing compositionend. Listen here too. Same recent-
+  // Composed stamp dedupes against the compositionend path so we
+  // don't double-send when both happen to fire.
+  ta.addEventListener('input', (e) => {
+    if (!tab.alive) return;
+    if (e.isComposing) return;  // mid-composition; not the commit
+    const t = e.inputType;
+    if (t !== 'insertText' && t !== 'insertCompositionText' &&
+        t !== 'insertFromComposition') return;
+    const val = e.data || '';
+    if (!val || !/[^\x00-\x7F]/.test(val)) return;  // ASCII path is fine
+    if (val === recentComposed.text && Date.now() - recentComposed.at < 200) {
+      return;  // already handled via compositionend
+    }
+    bridgeFor(tab).write(tab.id, val).catch(() => {});
+    recentComposed.text = val;
+    recentComposed.at = Date.now();
+  }, true);
+
+  // Filter for the matching term.onData burst. xterm.js's
+  // CompositionHelper fires _coreService.triggerDataEvent shortly
+  // after compositionend with the same text — without this we'd
+  // send each Chinese character twice.
+  tab._suppressOnData = (data) => {
+    if (!data) return false;
+    if (data !== recentComposed.text) return false;
+    if (Date.now() - recentComposed.at > 200) return false;
+    return true;
+  };
 }
 
 function attachTouchScroll(tab) {
@@ -1200,7 +1270,14 @@ function keybarBytesFor(action) {
     if (action.startsWith('char:')) bytes = applyCtrlIfArmed(bytes);
     else if (ctrlArmed) setCtrlArmed(false);
     bridgeFor(tab).write(tab.id, bytes).catch(() => {});
-    try { tab.term.focus(); } catch (_) {}
+    // Don't call tab.term.focus() here. Focusing the hidden textarea
+    // triggers Android to (re)open the IME — even for navigation
+    // taps like PgUp/PgDn/arrows where the user has no intention to
+    // type. The button itself "blurs" the textarea on tap, which is
+    // a feature for navigation actions; if the user wants to type
+    // next they'll tap the terminal again. Char-injecting buttons
+    // (Tab, |, /, etc.) lose the soft keyboard too, which is a fair
+    // tradeoff for the rest of the row not flashing the IME.
   });
 })();
 
