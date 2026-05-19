@@ -78,27 +78,50 @@ function sessionInstanceCount(sessionId) {
 async function loadSessions() {
   const arr = (await Store.get(KEY_SESSIONS)) || [];
   sessions = Array.isArray(arr) ? arr : [];
-  // Inject a friendly empty-state seed on first run so users have a
-  // template to edit.
+  // First-run seed. We bias toward "Termux on this phone" because the
+  // most common setup is Claude Sessions + Termux side-by-side: Termux
+  // runs sshd on localhost:8022, our APK connects to it for a "real
+  // Linux on the phone" tab. Users with a VPS can edit / clone this
+  // entry. Once they have ANY saved session this seed never runs again.
   if (!sessions.length) {
-    sessions = [{
-      id: newPersistentId(),
-      name: 'My VPS',
-      host: '',
-      port: 22,
-      username: 'root',
-      authType: 'password',
-      password: '',
-      privateKey: '',
-      privateKeyPassphrase: '',
-      port_forwards: '',
-      persistent: true,
-      working_dir: '',
-      pre_command: '',
-      claude_cmd: 'claude',
-      claude_args: '',
-      description: 'Edit this — host/username/password are blank.',
-    }];
+    sessions = [
+      {
+        id: newPersistentId(),
+        name: 'Termux (this phone)',
+        host: '127.0.0.1',
+        port: 8022,
+        username: '',
+        authType: 'password',
+        password: '',
+        privateKey: '',
+        privateKeyPassphrase: '',
+        port_forwards: '',
+        persistent: true,
+        working_dir: '',
+        pre_command: '',
+        claude_cmd: '',
+        claude_args: '',
+        description: 'Tap Edit and fill username (run `whoami` in Termux) + password (`passwd` in Termux). See docs/TERMUX-SETUP.md.',
+      },
+      {
+        id: newPersistentId(),
+        name: 'Example VPS',
+        host: '',
+        port: 22,
+        username: 'root',
+        authType: 'password',
+        password: '',
+        privateKey: '',
+        privateKeyPassphrase: '',
+        port_forwards: '',
+        persistent: true,
+        working_dir: '',
+        pre_command: '',
+        claude_cmd: 'claude',
+        claude_args: '',
+        description: 'Edit me with your VPS host / credentials, then Launch.',
+      },
+    ];
   }
 }
 

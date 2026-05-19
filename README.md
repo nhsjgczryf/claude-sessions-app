@@ -185,6 +185,12 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 
 会话存在 Capacitor Preferences（应用沙盒，卸载一起删）。**不会跨设备同步**——多设备共享需要手动 export / import（暂未做 UI）。
 
+#### 想要"手机本机的 bash" tab
+
+装 [Termux](https://f-droid.org/en/packages/com.termux/) + [Termux:Boot](https://f-droid.org/en/packages/com.termux.boot/)（都从 F-Droid），跑一次 sshd + 设密码 + 加开机自启脚本，然后用 APK 里预设的 **`Termux (this phone)`** session 连 `127.0.0.1:8022` 即可。完整步骤约 5 分钟一次性配置：[docs/TERMUX-SETUP.md](docs/TERMUX-SETUP.md)。
+
+这套配完之后，"远端 VPS 的 SSH tab" 和 "手机本机 Termux bash tab" 在 APK 里平级混用——两边都跑 tmux 持久化、都能 SCP 图片、都接 `claude` 命令。
+
 ### 功能对照（vs 桌面/Web 版）
 
 | 功能 | APK |
