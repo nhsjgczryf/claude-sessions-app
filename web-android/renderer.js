@@ -416,6 +416,7 @@ async function launchSession(sessionId, opts) {
   };
   tabs.push(tab);
   attachTouchScroll(tab);
+  attachSoftKeyboardFix(tab);
 
   term.onData((data) => {
     if (!tab.alive) return;
@@ -621,6 +622,17 @@ SshBridge.onWarning((ev) => {
   notify(ev.error || JSON.stringify(ev), 'error');
 });
 
+// Phase markers during connect so the user knows we're not frozen
+// when sshj's TCP / auth handshakes take a while.
+SshBridge.onStatus((ev) => {
+  const tab = tabs.find((t) => t.id === ev.tabId);
+  if (!tab) return;
+  // "Ready" is the last status before the shell takes over — don't
+  // print it (the prompt itself signals readiness).
+  if (ev.status === 'Ready') return;
+  tab.term.write(`\x1b[90m[${ev.status}]\x1b[0m\r\n`);
+});
+
 // ============================================================================
 // Keyboard handlers (Ctrl-arm, copy, paste, close)
 // ============================================================================
@@ -727,6 +739,34 @@ function isTouchDevice() {
   if (q.get('keybar') === 'force') return true;
   if (q.get('keybar') === 'off') return false;
   return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+}
+
+// Android soft keyboards (Gboard, Sogou, etc.) don't fire reliable
+// keydown/keyup events for Backspace inside a WebView — they emit
+// 'beforeinput' / 'input' with inputType === 'deleteContentBackward'
+// instead. xterm.js's hidden textarea hears those events but doesn't
+// translate the deletion to a 0x7f over its onData channel, so the
+// user types into the terminal and Backspace silently does nothing
+// (only working after they tap into a non-xterm input first because
+// that one DOES respect the deletion event).
+//
+// Fix: hook the textarea's beforeinput in capture phase, forward
+// the deletion ourselves as a raw DEL byte, and preventDefault so
+// xterm doesn't process the empty-textarea-changed event.
+function attachSoftKeyboardFix(tab) {
+  const ta = tab.term && tab.term.textarea;
+  if (!ta) return;
+  ta.addEventListener('beforeinput', (e) => {
+    if (!tab.alive) return;
+    const t = e.inputType;
+    if (t === 'deleteContentBackward' || t === 'deleteWordBackward') {
+      e.preventDefault();
+      SshBridge.write(tab.id, '\x7f').catch(() => {});
+    } else if (t === 'deleteContentForward') {
+      e.preventDefault();
+      SshBridge.write(tab.id, '\x1b[3~').catch(() => {});
+    }
+  }, true);
 }
 
 function attachTouchScroll(tab) {
@@ -919,6 +959,20 @@ $('#editor-cancel').addEventListener('click', closeEditor);
 $('#editor-form').addEventListener('submit', saveEditor);
 document.querySelectorAll('#editor-form input[name="authType"]').forEach((el) => {
   el.addEventListener('change', updateAuthVisibility);
+});
+
+// Show/hide toggle for password + passphrase fields. The button stays
+// "shown" (eye highlighted) while the input is type=text so the user
+// can tell at a glance whether it's visible.
+document.querySelectorAll('.password-toggle').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const name = btn.dataset.for;
+    const input = document.querySelector(`#editor-form input[name="${name}"]`);
+    if (!input) return;
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.classList.toggle('shown', !showing);
+  });
 });
 $('#btn-collapse').addEventListener('click', () => setSidebarCollapsed(true));
 $('#btn-expand').addEventListener('click', () => setSidebarCollapsed(false));

@@ -23,6 +23,7 @@
   const dataListeners = new Set();
   const exitListeners = new Set();
   const warningListeners = new Set();
+  const statusListeners = new Set();
 
   if (SSH) {
     SSH.addListener('data', (ev) => {
@@ -34,6 +35,13 @@
     SSH.addListener('warning', (ev) => {
       for (const cb of warningListeners) { try { cb(ev); } catch (_) {} }
       console.warn('[ssh] warning:', ev);
+    });
+    // 'status' fires during connect with phase strings like "Connecting…",
+    // "Authenticating…", "Opening shell…", "Ready" — used by the
+    // renderer to keep the user informed while sshj's blocking calls
+    // are still in progress.
+    SSH.addListener('status', (ev) => {
+      for (const cb of statusListeners) { try { cb(ev); } catch (_) {} }
     });
   }
 
@@ -85,6 +93,7 @@
     onData(cb)    { dataListeners.add(cb);    return () => dataListeners.delete(cb); },
     onExit(cb)    { exitListeners.add(cb);    return () => exitListeners.delete(cb); },
     onWarning(cb) { warningListeners.add(cb); return () => warningListeners.delete(cb); },
+    onStatus(cb)  { statusListeners.add(cb);  return () => statusListeners.delete(cb); },
   };
 
   // Lightweight key/value store. Uses Capacitor Preferences when

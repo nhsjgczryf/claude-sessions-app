@@ -114,7 +114,10 @@
 
         <div class="field auth-password">
           <label>Password <span class="dim">(stored on this device in plaintext — sideload only)</span></label>
-          <input type="password" name="password" autocomplete="new-password" />
+          <div class="password-wrap">
+            <input type="password" name="password" autocomplete="new-password" />
+            <button type="button" class="password-toggle" data-for="password" aria-label="Show password">&#x1F441;</button>
+          </div>
         </div>
 
         <div class="field auth-key">
@@ -124,7 +127,10 @@
 
         <div class="field auth-key">
           <label>Private key passphrase <span class="dim">(if key is encrypted)</span></label>
-          <input type="password" name="privateKeyPassphrase" autocomplete="off" />
+          <div class="password-wrap">
+            <input type="password" name="privateKeyPassphrase" autocomplete="off" />
+            <button type="button" class="password-toggle" data-for="privateKeyPassphrase" aria-label="Show passphrase">&#x1F441;</button>
+          </div>
         </div>
 
         <div class="field">

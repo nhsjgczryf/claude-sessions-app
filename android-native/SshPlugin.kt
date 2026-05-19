@@ -44,6 +44,22 @@ class SshPlugin : Plugin() {
     // thread per connection both touch it.
     private val sessions = ConcurrentHashMap<String, Entry>()
 
+    // tabId -> client that's still in the middle of connect/auth.
+    // Tracked separately so close() can interrupt a stuck handshake
+    // (DNS timeout, refused TCP, slow auth) — without this the user
+    // is stuck staring at "[connecting…]" with no way to cancel.
+    private val pending = ConcurrentHashMap<String, SSHClient>()
+
+    // Small helper for surfacing connect progress back to JS so the
+    // user knows we're not frozen.
+    private fun emitStatus(tabId: String, status: String) {
+        val ev = JSObject().apply {
+            put("tabId", tabId)
+            put("status", status)
+        }
+        notifyListeners("status", ev)
+    }
+
     // ------------------------------------------------------------ connect
 
     @PluginMethod
@@ -60,14 +76,15 @@ class SshPlugin : Plugin() {
         val initialCommand = call.getString("initialCommand")
         val portForwards = call.getArray("portForwards")        // array of "local:remoteHost:remotePort"
 
-        if (sessions.containsKey(tabId)) {
-            return call.reject("tabId already has an active session: $tabId")
+        if (sessions.containsKey(tabId) || pending.containsKey(tabId)) {
+            return call.reject("tabId already has an active or pending session: $tabId")
         }
 
         // Do the connect on a background thread — sshj's blocking
         // socket ops would otherwise pin the WebView.
         thread(name = "ssh-connect-$tabId") {
             val client = SSHClient()
+            pending[tabId] = client
             try {
                 // TODO(security): persist a known_hosts file under
                 // context.filesDir and verify against it. For the
@@ -79,8 +96,10 @@ class SshPlugin : Plugin() {
                 client.addHostKeyVerifier(PromiscuousVerifier())
                 client.connectTimeout = 15_000
                 client.timeout = 60_000
+                emitStatus(tabId, "Connecting to $host:$port…")
                 client.connect(host, port)
 
+                emitStatus(tabId, "Authenticating as $username…")
                 // Auth: prefer key if both provided. sshj's auth*
                 // methods throw on failure; we surface a clean
                 // message rather than a stack trace.
@@ -111,6 +130,7 @@ class SshPlugin : Plugin() {
                     }
                 }
 
+                emitStatus(tabId, "Opening shell…")
                 val session = client.startSession()
                 // sshj's allocatePTY honors term type + initial cols/rows,
                 // so we don't need a follow-up changeWindowDimensions
@@ -123,6 +143,7 @@ class SshPlugin : Plugin() {
 
                 val entry = Entry(tabId, client, session, shell, alive = true)
                 sessions[tabId] = entry
+                pending.remove(tabId)
 
                 // Apply initial size — useResize handles it via SSH
                 // window-change.
@@ -166,11 +187,17 @@ class SshPlugin : Plugin() {
                 // least one SSH session is open.
                 ensureForegroundService()
 
+                emitStatus(tabId, "Ready")
                 val ret = JSObject().apply { put("tabId", tabId) }
                 call.resolve(ret)
             } catch (e: Throwable) {
+                pending.remove(tabId)
                 try { client.disconnect() } catch (_: Throwable) {}
-                call.reject(e.message ?: "ssh connect failed", e)
+                // Surface a friendlier message for the common "user
+                // closed mid-handshake" case so JS doesn't pop an
+                // ugly error toast.
+                val msg = e.message ?: "ssh connect failed"
+                call.reject(msg, e)
             }
         }
     }
@@ -258,8 +285,15 @@ class SshPlugin : Plugin() {
     @PluginMethod
     fun close(call: PluginCall) {
         val tabId = call.getString("tabId") ?: return call.reject("tabId required")
-        val entry = sessions[tabId] ?: return call.resolve()
-        emitExit(tabId, entry)
+        // Cancel an in-flight connect first — disconnect() interrupts
+        // sshj's blocking socket ops so the connect thread unwinds
+        // and reports a clean failure to JS.
+        val pendingClient = pending.remove(tabId)
+        if (pendingClient != null) {
+            try { pendingClient.disconnect() } catch (_: Throwable) {}
+        }
+        val entry = sessions[tabId]
+        if (entry != null) emitExit(tabId, entry)
         call.resolve()
     }
 
