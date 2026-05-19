@@ -64,7 +64,10 @@ FROM alpine:3.20 AS builder
 ARG PROOT_REF
 RUN apk add --no-cache build-base git talloc-dev talloc-static \
       linux-headers musl-dev autoconf libarchive-dev libarchive-static \
-      python3
+      bsd-compat-headers python3
+# bsd-compat-headers provides <sys/queue.h> (LIST_*) and <err.h> that
+# proot's tracee/tracee.h relies on. They're BSD-isms that musl
+# explicitly doesn't ship in the base musl-dev package.
 # Try the requested ref, fall back to default branch. proot-me's
 # release cadence is irregular so PROOT_REF defaults are best-effort.
 # Cleanup the partial /proot from a failed --branch clone before
