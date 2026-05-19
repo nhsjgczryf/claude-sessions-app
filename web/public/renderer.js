@@ -647,6 +647,8 @@ function launchSession(sessionId) {
   };
   tabs.push(tab);
 
+  attachTouchScroll(tab);
+
   term.onData((data) => {
     if (!tab.alive) return;
     const out = applyCtrlIfArmed(data);
@@ -1231,6 +1233,58 @@ function keybarBytesFor(action) {
     try { tab.term.focus(); } catch (_) {}
   });
 })();
+
+// xterm.js v6 has no built-in touch-scroll handling — a finger drag
+// inside the terminal area triggers selection instead of scrolling
+// the buffer, so on phones you can only ever see the bottom screenful
+// of output. We intercept touchmove on the container in the capture
+// phase, convert vertical delta into term.scrollLines() calls, and
+// preventDefault so xterm's selection logic never starts.
+//
+// Tap (no movement) still falls through, so xterm-tap-to-focus and
+// long-press-to-select still work. Two-finger gestures (pinch zoom on
+// the page) are also passed through unchanged.
+function attachTouchScroll(tab) {
+  if (!isTouchDevice()) return;
+  const container = tab.container;
+  let lastY = null;
+  let totalDy = 0;
+  let pxPerLine = 17;
+  let scrolling = false;
+  const DEADZONE_PX = 10;
+
+  container.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { lastY = null; return; }
+    lastY = e.touches[0].clientY;
+    totalDy = 0;
+    scrolling = false;
+    // Re-measure each gesture in case font-size / fit changed.
+    const row = container.querySelector('.xterm-rows > div');
+    const h = row && row.getBoundingClientRect().height;
+    if (h && h > 0) pxPerLine = h;
+  }, { passive: true, capture: true });
+
+  container.addEventListener('touchmove', (e) => {
+    if (lastY == null || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    const dy = y - lastY;
+    totalDy += dy;
+    // Don't hijack short taps — only kick into scroll mode after the
+    // finger has moved past the deadzone vertically.
+    if (!scrolling && Math.abs(totalDy) < DEADZONE_PX) return;
+    scrolling = true;
+    lastY = y;
+    const lines = -Math.round(dy / pxPerLine);
+    if (lines !== 0) {
+      try { tab.term.scrollLines(lines); } catch (_) {}
+      e.preventDefault();
+    }
+  }, { passive: false, capture: true });
+
+  const reset = () => { lastY = null; totalDy = 0; scrolling = false; };
+  container.addEventListener('touchend', reset, { passive: true, capture: true });
+  container.addEventListener('touchcancel', reset, { passive: true, capture: true });
+}
 
 function updateKeybarVisibility() {
   const tab = tabs.find((t) => t.id === activeTabId);
