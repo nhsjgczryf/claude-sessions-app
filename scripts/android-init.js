@@ -219,6 +219,14 @@ function patchAppGradle() {
   // We use a marker comment so re-runs don't duplicate the lines.
   //
   //   sshj                — remote SSH (SshPlugin)
+  //   bcprov-jdk18on      — BouncyCastle provider, required so the
+  //                         SshPlugin can swap out Android's partial
+  //                         "BC" provider for the full implementation
+  //                         (otherwise sshj's X25519 / curve25519-
+  //                         sha256 KEX fails on every modern server).
+  //                         sshj declares BC as runtimeOnly in its
+  //                         own POM, so the class is NOT visible at
+  //                         compile time unless we add it directly.
   //   androidx.core-ktx   — NotificationCompat for ForegroundService
   //   zstd-jni            — decompress assets/alpine-rootfs.tar.zst on
   //                         first launch of a local Linux session
@@ -231,6 +239,7 @@ function patchAppGradle() {
     const inject = `
     ${MARKER}
     implementation 'com.hierynomus:sshj:0.39.0'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'com.github.luben:zstd-jni:1.5.6-3@aar'
     implementation 'org.apache.commons:commons-compress:1.26.2'
