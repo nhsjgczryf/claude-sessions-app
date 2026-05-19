@@ -798,15 +798,29 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   .tab {
     height: 44px;
     min-width: 110px;
-    max-width: 180px;
-    padding: 0 14px;
+    max-width: 200px;
+    padding: 0 6px 0 14px;
   }
   .tab-close {
-    width: 32px;
-    height: 32px;
-    line-height: 30px;
-    font-size: 20px;
+    /* Bumped from 32 to 44 (Android touch-target minimum) and given
+     * touch-action: manipulation so the WebView's horizontal-scroll
+     * gesture detector on the parent #tabs row doesn't swallow the
+     * tap waiting for a drag. The negative margin pulls the visual
+     * edge of the button back into the tab without growing the tab
+     * past its own height. */
+    width: 44px;
+    height: 44px;
+    line-height: 42px;
+    font-size: 22px;
+    margin: 0 -8px 0 4px;
+    text-align: center;
+    touch-action: manipulation;
+    /* Slightly highlight on press so taps have visible feedback. */
+    border-radius: 6px;
   }
+  .tab-close:active { background: var(--red); color: white; }
+  /* Make the visible tab line height fit. */
+  .tab { align-items: center; }
   .session-actions button {
     min-height: 36px;
     padding: 8px 12px;

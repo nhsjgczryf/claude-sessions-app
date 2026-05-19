@@ -696,13 +696,52 @@ function renderTabs() {
     div.innerHTML = `
       <span class="tab-status"></span>
       <span class="tab-name">${escapeHtml(t.sessionName)}</span>
-      <span class="tab-close" title="Close">&times;</span>
+      <span class="tab-close" title="Close (or long-press the tab)">&times;</span>
     `;
     div.addEventListener('click', (e) => {
-      if (e.target.classList.contains('tab-close')) closeTab(t.id);
-      else switchToTab(t.id);
+      if (e.target.classList.contains('tab-close')) {
+        closeTab(t.id);
+        return;
+      }
+      switchToTab(t.id);
     });
     div.addEventListener('auxclick', (e) => { if (e.button === 1) closeTab(t.id); });
+
+    // Long-press (>500ms) anywhere on the tab also closes it. Belt-
+    // and-braces in case the small X is still hard to hit on touch,
+    // or in case Android WebView's drag-vs-tap arbitration still eats
+    // the X's click.
+    let pressTimer = null;
+    let pressStartX = 0, pressStartY = 0;
+    let pressMoved = false;
+    div.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      pressMoved = false;
+      pressStartX = e.touches[0].clientX;
+      pressStartY = e.touches[0].clientY;
+      pressTimer = setTimeout(() => {
+        if (!pressMoved) {
+          // Visual ack — flash the tab red briefly before closing
+          // so the user knows the long-press registered.
+          div.style.background = 'var(--red)';
+          setTimeout(() => closeTab(t.id), 80);
+        }
+      }, 500);
+    }, { passive: true });
+    div.addEventListener('touchmove', (e) => {
+      if (!pressTimer || e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - pressStartX;
+      const dy = e.touches[0].clientY - pressStartY;
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+        pressMoved = true;
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+    }, { passive: true });
+    const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+    div.addEventListener('touchend', cancelPress, { passive: true });
+    div.addEventListener('touchcancel', cancelPress, { passive: true });
+
     attachTabDragHandlers(div, t.id);
     el.appendChild(div);
   }
