@@ -79,6 +79,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Compute build timestamp
+        id: ts
+        # softprops/action-gh-release@v2 updates an existing release's
+        # body + assets but doesn't refresh `published_at`, so the
+        # Releases page still shows "X hours ago" from the FIRST run.
+        # Stamping the timestamp into the release name itself is the
+        # simplest reliable freshness signal.
+        run: echo "TS=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+
       - name: Publish APK to GitHub Release
         # Tagged builds → versioned release named after the tag.
         # main / workflow_dispatch → rolling 'latest' pre-release that
@@ -89,8 +98,8 @@ jobs:
         with:
           files: dist/*.apk
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Rolling main build' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Rolling main build · {0}', steps.ts.outputs.TS) }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') && 'true' || 'false' }}
           generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
-          body: ${{ !startsWith(github.ref, 'refs/tags/') && format('Auto-built from main @ `{0}`. Overwritten on every push — for a versioned APK, use a tagged release instead.', github.sha) || '' }}
+          body: ${{ !startsWith(github.ref, 'refs/tags/') && format('Built {0} from `{1}`. Overwritten on every push — for a versioned APK, use a tagged release instead.', steps.ts.outputs.TS, github.sha) || '' }}
