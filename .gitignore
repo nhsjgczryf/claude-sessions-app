@@ -12,3 +12,12 @@ auth-sessions.json
 # Local session config — copy sessions.example.json on first run.
 # Untracked so personal SSH hosts / paths never get pushed.
 sessions.json
+
+# Capacitor generates the entire android/ project on demand from
+# capacitor.config.json + web-android/. CI regenerates it on every
+# build via `npm run android:init`. Keeping it out of the repo
+# avoids huge gradle/wrapper noise in PRs.
+android/
+.gradle/
+*.apk
+*.aab

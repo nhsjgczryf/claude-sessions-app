@@ -162,6 +162,48 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 
 同理可以用 `port_forwards: 9222` + `pre_command: google-chrome --headless=new --remote-debugging-port=9222 >/dev/null 2>&1 &` 来转发 Chrome DevTools Protocol，供本地 Claude / Playwright 调用。
 
+## Android APK
+
+把这个 app 当作"**手机 ↔ VPS 的稳定通道**"用：服务端跑在你掌控的某台机器上（VPS / 家里 PC / 开发 box，只要能跑 `npm run web` 即可），APK 是一个 WebView 套壳指向那台机器。所有的 PTY / SSH / Claude 真正在 VPS 上跑，手机只负责显示+输入。
+
+### 获取 APK
+
+1. **从 Releases 下载**：每次打 tag（`git tag v1.2.3 && git push --tags`）GitHub Actions 会自动构建 APK 并附在 Release 里。
+2. **本地编译**（需要 JDK 17 + Android SDK）：
+   ```bash
+   npm install
+   npm run android:init   # 第一次：生成 android/ 目录
+   npm run android:build  # 编译 debug APK
+   # 产物：android/app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+### 服务器端准备
+
+VPS 上正常跑：
+
+```bash
+HOST=0.0.0.0 PORT=3000 TRUST_PROXY=1 npm run web
+# 套上 Caddy / nginx 拿 HTTPS（推荐），或在私网 / Tailscale 里跑 http
+```
+
+注册账号、配 SSH 隧道、装 tmux，跟桌面 / Web 版完全一样——只是入口换成了 APK。
+
+### 首次启动
+
+装 APK 后打开，会弹一个表单让你填 VPS URL（`https://my-vps.example.com` 或局域网内 `http://192.168.1.5:3000`）。填完点 Connect，URL 会通过 Capacitor Preferences 存到 Android 应用沙盒里，后续启动自动跳过这一步直接连。
+
+想改 URL：进入 app 后用 `?reset=1` 重新打开（暂时只能这样；未来加按钮）。或者清掉应用数据。
+
+### 设计取舍
+
+- **手机本身永远不跑 PTY/SSH**。Termux 的 node-pty 编译坑太多，nodejs-mobile 在 Android 上的兼容性问题更难调。APK 只做 UI shell，关键状态全在 VPS。
+- **PWA 已经覆盖 95% 的功能**（图标、全屏、键盘工具栏、相册粘贴、tab 持久化、tmux 兜底）。APK 比 PWA 多的：
+  - 独立 app 入口，不依赖浏览器
+  - Android 后台保活更顽强（但不绝对，最终还是靠服务端 PTY grace + tmux 兜底）
+  - 没有浏览器地址栏
+  - 沙盒存储（URL 存在 Capacitor Preferences 而不是 cookie）
+- 不需要 Google Play 上架：sideload 即可。系统会警告"未知来源"，照常确认安装。
+
 ## 技术栈
 
 | 组件 | 技术 |

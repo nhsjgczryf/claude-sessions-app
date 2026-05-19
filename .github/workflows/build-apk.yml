@@ -1,0 +1,75 @@
+name: Build Android APK
+
+# Builds a sideload-ready debug APK on every push to main and on tag
+# creation. Tagged builds also upload the APK to a GitHub Release so
+# users can download it directly. The APK is a Capacitor shell — it
+# asks for your VPS URL on first launch and just hosts a WebView from
+# then on. The actual server (PTYs, SSH, sessions) runs on your VPS.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to attach the APK to a release on tagged builds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install npm deps
+        # node-pty has no Android-arm64 prebuild and would try to compile
+        # from source; we don't need it inside the APK because the
+        # APK is a thin WebView wrapping the user's VPS. Skip optional
+        # native scripts to avoid wasting CI minutes.
+        run: npm install --ignore-scripts
+
+      - name: Initialize / sync Android project
+        run: npm run android:init
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Rename APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             dist/claude-sessions-${GITHUB_REF_NAME//\//-}.apk
+          ls -lh dist/
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-sessions-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach APK to GitHub Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          generate_release_notes: true

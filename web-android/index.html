@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#1e1e2e" />
+  <title>Claude Sessions</title>
+  <style>
+    :root {
+      --bg: #1e1e2e; --bg2: #252536; --fg: #cdd6f4; --fg-dim: #6c7086;
+      --accent: #89b4fa; --border: #45475a; --input-bg: #313244;
+      --red: #f38ba8;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100vh; background: var(--bg); color: var(--fg);
+      font-family: 'Segoe UI', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+    .center { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .card { width: min(420px, 100%); background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+    h1 { color: var(--accent); margin: 0 0 4px; font-size: 22px; }
+    .sub { color: var(--fg-dim); font-size: 13px; line-height: 1.5; margin: 0 0 18px; }
+    label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--fg-dim); margin: 14px 0 4px; }
+    input[type=url] {
+      width: 100%; padding: 12px 14px; font-size: 16px;
+      background: var(--input-bg); color: var(--fg); border: 1px solid var(--border);
+      border-radius: 6px; outline: none; font-family: 'Cascadia Code', monospace;
+    }
+    input[type=url]:focus { border-color: var(--accent); }
+    button { width: 100%; margin-top: 18px; padding: 14px; border: 0; border-radius: 8px;
+      background: var(--accent); color: var(--bg); font-weight: 600; font-size: 15px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error { color: var(--red); font-size: 13px; min-height: 16px; margin-top: 12px; }
+    .hint { font-size: 11px; color: var(--fg-dim); margin-top: 8px; line-height: 1.5; }
+    .splash { text-align: center; font-size: 14px; color: var(--fg-dim); }
+    .icon { width: 72px; height: 72px; display: block; margin: 0 auto 14px; }
+  </style>
+</head>
+<body>
+  <div class="center">
+    <div class="card">
+
+      <div id="splash" class="splash">
+        <svg class="icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+          <rect width="512" height="512" rx="96" fill="#1e1e2e"/>
+          <g stroke="#89b4fa" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" fill="none">
+            <polyline points="148,184 232,256 148,328" />
+            <line x1="270" y1="340" x2="380" y2="340" />
+          </g>
+        </svg>
+        <div>Connecting…</div>
+      </div>
+
+      <form id="setup" style="display:none">
+        <svg class="icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+          <rect width="512" height="512" rx="96" fill="#1e1e2e"/>
+          <g stroke="#89b4fa" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" fill="none">
+            <polyline points="148,184 232,256 148,328" />
+            <line x1="270" y1="340" x2="380" y2="340" />
+          </g>
+        </svg>
+        <h1>Claude Sessions</h1>
+        <p class="sub">
+          This app is a thin shell around your VPS. Point it at a server running
+          <code>npm run web</code> and your account/sessions live there.
+        </p>
+        <label for="url">VPS / Server URL</label>
+        <input id="url" type="url" placeholder="https://my-vps.example.com" inputmode="url"
+               autocomplete="url" autocapitalize="none" spellcheck="false" required />
+        <button type="submit" id="connect">Connect</button>
+        <div id="err" class="error"></div>
+        <div class="hint">
+          Use <code>https://</code> in production. Plain <code>http://</code> only works on private LAN /
+          VPN. The URL is stored on this device and can be changed by long-pressing the in-app sidebar
+          header.
+        </div>
+      </form>
+
+    </div>
+  </div>
+
+  <script>
+    // Capacitor injects itself as window.Capacitor when running inside
+    // the APK. When loaded as a plain web page (e.g. testing in a
+    // desktop browser) we fall back to localStorage.
+    const KEY = 'server_url';
+
+    function inCapacitor() {
+      return !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences);
+    }
+
+    async function getStoredUrl() {
+      try {
+        if (inCapacitor()) {
+          const { value } = await window.Capacitor.Plugins.Preferences.get({ key: KEY });
+          return value || null;
+        }
+        return localStorage.getItem(KEY) || null;
+      } catch (e) { return null; }
+    }
+
+    async function setStoredUrl(value) {
+      try {
+        if (inCapacitor()) {
+          await window.Capacitor.Plugins.Preferences.set({ key: KEY, value });
+        } else {
+          localStorage.setItem(KEY, value);
+        }
+      } catch (e) {}
+    }
+
+    function show(which) {
+      document.getElementById('splash').style.display = which === 'splash' ? 'block' : 'none';
+      document.getElementById('setup').style.display = which === 'setup' ? 'block' : 'none';
+    }
+
+    function normalize(u) {
+      u = (u || '').trim();
+      if (!u) return '';
+      if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+      // Strip trailing slash for predictable concat later
+      return u.replace(/\/+$/, '');
+    }
+
+    async function ping(url) {
+      // 'no-cors' so we don't need the server to send CORS headers just
+      // to be reachable here — we can't read the response either way,
+      // but a resolved promise (vs DNS / connection-refused error) is
+      // enough proof that the URL is alive. False positives on misrouted
+      // hosts are acceptable; the user retries.
+      try {
+        await fetch(url + '/api/auth/status', {
+          method: 'GET',
+          mode: 'no-cors',
+          cache: 'no-store',
+        });
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function go(url) {
+      // Hand the WebView over to the user's VPS. From here on the page
+      // is served by their own server — same UX as the PWA.
+      location.replace(url + '/');
+    }
+
+    async function boot() {
+      const allowReset = new URLSearchParams(location.search).has('reset');
+      const stored = allowReset ? null : await getStoredUrl();
+      if (stored) {
+        show('splash');
+        document.querySelector('#splash div').textContent = 'Connecting to ' + stored + ' …';
+        await go(stored);
+        return;
+      }
+      show('setup');
+      document.getElementById('url').focus();
+    }
+
+    document.getElementById('setup').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('connect');
+      const errEl = document.getElementById('err');
+      errEl.textContent = '';
+      const raw = document.getElementById('url').value;
+      const url = normalize(raw);
+      if (!url) { errEl.textContent = 'Enter a URL'; return; }
+
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      const ok = await ping(url);
+      btn.disabled = false;
+      btn.textContent = 'Connect';
+      if (!ok) {
+        errEl.textContent = "Couldn't reach " + url + " — check URL & HTTPS / network.";
+        return;
+      }
+      await setStoredUrl(url);
+      await go(url);
+    });
+
+    boot();
+  </script>
+</body>
+</html>

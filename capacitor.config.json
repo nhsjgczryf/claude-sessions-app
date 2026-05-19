@@ -1,0 +1,15 @@
+{
+  "appId": "app.claudesessions.android",
+  "appName": "Claude Sessions",
+  "webDir": "web-android",
+  "loggingBehavior": "production",
+  "android": {
+    "backgroundColor": "#1e1e2e",
+    "allowMixedContent": true,
+    "captureInput": true
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false },
+    "Preferences": { "group": "claude-sessions" }
+  }
+}
