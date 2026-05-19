@@ -211,6 +211,21 @@ EOF
 RUN ln -sf /root/.profile /root/.ashrc \
  && echo 'export ENV=/root/.profile' >> /etc/profile
 
+# tmux: enable mouse-tracking so the WebView's touch-scroll (which
+# the renderer converts into SGR wheel events when an alt-screen TUI
+# is active) actually scrolls tmux's scrollback. Without this, swipe
+# in a tmux pane does nothing — tmux's own buffer hides xterm.js's
+# native scrollback. Also lets the user tap to switch panes.
+RUN mkdir -p /root && cat > /root/.tmux.conf <<'TMUX'
+set -g mouse on
+set -g default-terminal "xterm-256color"
+set -ga terminal-overrides ",xterm-256color:Tc"
+# Status line gets in the way on a phone; keep it minimal.
+set -g status-style "bg=default fg=cyan"
+set -g status-left "[#S] "
+set -g status-right "%H:%M"
+TMUX
+
 # Make sure /tmp exists with the right perms (some npm tools need it)
 RUN mkdir -p /tmp && chmod 1777 /tmp
 DOCKERFILE

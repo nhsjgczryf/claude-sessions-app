@@ -43,6 +43,10 @@
         <p class="hint">All SSH connections live in this app — no server required.</p>
       </div>
     </div>
+    <!-- Only keys the Android soft keyboard either can't reach or
+         hides under modifier pages. Punctuation (|, /, ~, etc.) is
+         on the keyboard's "123" / symbols page already so it
+         doesn't earn its spot here. -->
     <div id="keybar" class="hidden" aria-hidden="true">
       <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
       <button type="button" data-keybar="key:Tab" title="Tab">Tab</button>
@@ -51,25 +55,10 @@
       <button type="button" data-keybar="key:ArrowDown">↓</button>
       <button type="button" data-keybar="key:ArrowLeft">←</button>
       <button type="button" data-keybar="key:ArrowRight">→</button>
-      <button type="button" data-keybar="key:Home">Hm</button>
-      <button type="button" data-keybar="key:End">End</button>
+      <button type="button" data-keybar="key:PageUp" title="Page Up (scroll up in tmux/less)">PgUp</button>
+      <button type="button" data-keybar="key:PageDown" title="Page Down">PgDn</button>
       <button type="button" data-keybar="ctrl:c" title="Ctrl+C">^C</button>
       <button type="button" data-keybar="ctrl:d" title="Ctrl+D">^D</button>
-      <button type="button" data-keybar="ctrl:z" title="Ctrl+Z">^Z</button>
-      <button type="button" data-keybar="ctrl:l" title="Ctrl+L">^L</button>
-      <button type="button" data-keybar="ctrl:r" title="Ctrl+R">^R</button>
-      <button type="button" data-keybar="char:|">|</button>
-      <button type="button" data-keybar="char:/">/</button>
-      <button type="button" data-keybar="char:\">\</button>
-      <button type="button" data-keybar="char:~">~</button>
-      <button type="button" data-keybar="char:-">-</button>
-      <button type="button" data-keybar="char:_">_</button>
-      <button type="button" data-keybar="char:&gt;">&gt;</button>
-      <button type="button" data-keybar="char:&lt;">&lt;</button>
-      <button type="button" data-keybar="char:&amp;">&amp;</button>
-      <button type="button" data-keybar="char:;">;</button>
-      <button type="button" data-keybar="char:'">'</button>
-      <button type="button" data-keybar='char:"'>"</button>
     </div>
   </div>
 

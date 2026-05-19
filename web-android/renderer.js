@@ -530,7 +530,24 @@ async function launchSession(sessionId, opts) {
   term.onData((data) => {
     if (!tab.alive) return;
     const out = applyCtrlIfArmed(data);
-    bridgeFor(tab).write(tabId, out).catch((err) => console.warn('[write]', err));
+    // Inside a full-screen TUI (claude-code / vim / less in
+    // alt-screen mode), IME-composed non-ASCII input (Chinese typed
+    // via Pinyin, etc.) only gets handled correctly when it arrives
+    // as a single bracketed-paste burst. Ink-based input widgets
+    // process plain bytes as individual keypresses and silently drop
+    // anything that doesn't look like ASCII printable. Wrapping in
+    // \x1b[200~…\x1b[201~ flips them into "this is a paste, insert
+    // verbatim" mode.
+    //
+    // Gated on alt-screen because vanilla bash WITHOUT readline's
+    // bracketed-paste-mode enabled would otherwise echo "[200~你好
+    // [201~" literally. Modern TUIs all enable paste mode on entry,
+    // and they all use alt-screen, so the two are well-correlated.
+    const altScreen = tab.term.buffer && tab.term.buffer.active &&
+      tab.term.buffer.active.type === 'alternate';
+    const nonAscii = /[^\x00-\x7F]/.test(out);
+    const payload = (altScreen && nonAscii) ? `\x1b[200~${out}\x1b[201~` : out;
+    bridgeFor(tab).write(tabId, payload).catch((err) => console.warn('[write]', err));
   });
   term.onResize(({ cols, rows }) => {
     if (tab.alive) bridgeFor(tab).resize(tabId, cols, rows).catch(() => {});
@@ -1103,7 +1120,26 @@ function attachTouchScroll(tab) {
     scrolling = true;
     lastY = y;
     const lines = -Math.round(dy / pxPerLine);
-    if (lines !== 0) { try { tab.term.scrollLines(lines); } catch (_) {} e.preventDefault(); }
+    if (lines === 0) return;
+
+    // tmux / vim / less / claude take over the screen with the
+    // "alternate" buffer — at that point xterm.js's own scrollback
+    // is empty and scrollLines() does nothing. Translate the swipe
+    // into SGR mouse-wheel events instead, which tmux with
+    // `set -g mouse on` (and most TUIs with mouse support) honor as
+    // scrollback navigation. Capped to ±3 events per touchmove so
+    // a single swipe doesn't fly past the user's target.
+    const altScreen = tab.term.buffer && tab.term.buffer.active &&
+      tab.term.buffer.active.type === 'alternate';
+    if (altScreen && tab.alive) {
+      const n = Math.min(3, Math.abs(lines));
+      const code = lines < 0 ? 64 : 65;   // 64 = wheel up, 65 = wheel down
+      const seq = `\x1b[<${code};1;1M`.repeat(n);
+      bridgeFor(tab).write(tab.id, seq).catch(() => {});
+    } else {
+      try { tab.term.scrollLines(lines); } catch (_) {}
+    }
+    e.preventDefault();
   }, { passive: false, capture: true });
   const reset = () => { lastY = null; totalDy = 0; scrolling = false; };
   container.addEventListener('touchend', reset, { passive: true, capture: true });
@@ -1139,6 +1175,8 @@ function keybarBytesFor(action) {
       case 'ArrowLeft': return '\x1b[D';
       case 'Home': return '\x1b[H';
       case 'End': return '\x1b[F';
+      case 'PageUp': return '\x1b[5~';
+      case 'PageDown': return '\x1b[6~';
     }
   } else if (kind === 'ctrl' && val && val.length === 1) {
     const c = val.toUpperCase().charCodeAt(0);
