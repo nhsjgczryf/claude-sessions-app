@@ -21,16 +21,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '22'
+          # No `cache: npm` — we don't commit package-lock.json (deps
+          # are mostly Capacitor-only and change rarely), and missing
+          # lockfile makes setup-node error on cache restore.
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -60,7 +62,7 @@ jobs:
           ls -lh dist/
 
       - name: Upload APK as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: claude-sessions-apk
           path: dist/*.apk
