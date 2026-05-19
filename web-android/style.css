@@ -918,3 +918,42 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 @media (max-width: 600px) {
   #install-chip { bottom: calc(env(safe-area-inset-bottom, 0px) + 48px); }
 }
+
+/* ============================================================
+ * Android WebView IME workaround
+ *
+ * xterm.js parks its hidden helper-textarea at `left: -9999em` so
+ * the cursor can stay focused without the textarea being visible.
+ * Chrome desktop / mobile Chrome / Firefox all dispatch IME
+ * composition events to it just fine. Android WebView, however,
+ * does an "is this element actually on-screen?" check before
+ * forwarding compositionstart/update/end from its InputConnection
+ * to the DOM — and the way it implements that check, anything
+ * positioned outside the viewport gets silently skipped.
+ *
+ * Symptom: typing Chinese (or any IME-composed text) in the APK
+ * works in Win/web/SSH-from-Termux but produces literally nothing
+ * inside the APK's terminal, even in plain bash. The compositionend
+ * event never fires, so xterm.js never calls onData, so we never
+ * write anything to the PTY.
+ *
+ * Fix: keep the textarea on-screen but visually inert. opacity 0
+ * hides it; pointer-events:none stops it from eating touches that
+ * should go to the canvas; z-index:-5 keeps it behind the cursor
+ * layer. xterm.js still moves it to the cursor position during
+ * composition (v6+ behavior) so the IME's candidate popup anchors
+ * sensibly.
+ */
+/* No !important on left/top: xterm.js v6's CompositionHelper sets
+ * those inline during active composition to anchor the IME candidate
+ * popup at the cursor, and we want that to win. Same-selector
+ * source-order is enough to override xterm.css's `left: -9999em`. */
+.xterm-helper-textarea {
+  left: 0;
+  top: 0;
+  width: 1ch !important;
+  height: 1em !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  z-index: -5 !important;
+}
