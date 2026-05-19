@@ -86,17 +86,14 @@ class SshPlugin : Plugin() {
                 // message rather than a stack trace.
                 when {
                     !privateKey.isNullOrBlank() -> {
-                        val kp: KeyProvider = if (privateKeyPassphrase.isNullOrEmpty()) {
-                            client.loadKeys(privateKey)
-                        } else {
-                            client.loadKeys(
-                                privateKey,
-                                null,
-                                net.schmizz.sshj.userauth.password.PasswordUtils.createOneOff(
-                                    privateKeyPassphrase.toCharArray(),
-                                ),
-                            )
-                        }
+                        // loadKeys(String) treats the argument as a FILE
+                        // PATH, not PEM contents — use the 3-arg overload
+                        // that takes a key string + optional public key
+                        // + optional PasswordFinder.
+                        val finder = if (privateKeyPassphrase.isNullOrEmpty()) null
+                        else net.schmizz.sshj.userauth.password.PasswordUtils
+                            .createOneOff(privateKeyPassphrase.toCharArray())
+                        val kp: KeyProvider = client.loadKeys(privateKey, null, finder)
                         client.authPublickey(username, kp)
                     }
                     !password.isNullOrEmpty() -> client.authPassword(username, password)
