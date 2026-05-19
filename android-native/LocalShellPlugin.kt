@@ -1,25 +1,46 @@
 /*
- * Capacitor plugin that spawns a local PTY in the app's own process —
- * sibling to SshPlugin (which talks to remote SSH hosts via sshj).
+ * Capacitor plugin that spawns a local PTY in the app's own process,
+ * either as a raw Android /system/bin/sh (Phase 1 fallback) or — when
+ * the bundled Linux assets are present — as a PRoot-wrapped Alpine
+ * Linux shell with bash, tmux, nodejs, and claude-code preinstalled.
  *
- * Phase 1 (this commit): execs Android's built-in /system/bin/sh as
- * a proof-of-concept that the JNI PTY plumbing works end-to-end. The
- * resulting shell is toybox-only — very limited, no bash, no package
- * manager — but it proves the architecture.
+ * First connect of any tab type triggers a one-time bootstrap:
  *
- * Phase 2 will bundle a PRoot binary + Alpine Linux rootfs in the APK
- * assets and exec `proot -r <rootfs> /bin/sh` here instead, giving
- * the user a real Linux environment with apk / bash / tmux / nodejs.
+ *   1. Copy assets/proot-arm64        → filesDir/proot-arm64  (chmod +x)
+ *   2. Stream assets/alpine-rootfs.tar.zst through Zstd + Tar into
+ *      filesDir/linux/                 (~15-30s on a midrange phone)
+ *   3. Write filesDir/linux-ready.<version> as the readiness marker so
+ *      subsequent launches skip extraction.
+ *
+ * Progress is reported back to JS via `status` events keyed by tabId so
+ * the user sees "Extracting Linux environment (45%)…" instead of
+ * staring at a blank terminal.
+ *
+ * If any extraction step fails — corrupt tar, out of disk, missing
+ * asset — we fall back to /system/bin/sh and emit a status line
+ * explaining what happened. That gives the user *some* shell instead
+ * of a blocked tab.
  */
 package app.claudesessions.android
 
+import android.content.res.AssetManager
+import android.os.StatFs
+import android.system.Os
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.github.luben.zstd.ZstdInputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 @CapacitorPlugin(name = "LocalShell")
@@ -34,7 +55,36 @@ class LocalShellPlugin : Plugin() {
 
     private val sessions = ConcurrentHashMap<String, Entry>()
 
-    // ------------------------------------------------------------ connect
+    // Serialize the bootstrap. Two tabs connecting at first launch
+    // both call ensureLinuxBootstrapped(); we want the second to wait
+    // (via the synchronized block) rather than racing to write to
+    // filesDir/linux/ in parallel.
+    private val bootstrapLock = Object()
+    private val bootstrapInProgress = AtomicBoolean(false)
+
+    // -----------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------
+
+    private val PROOT_ASSET = "proot-arm64"
+    private val ROOTFS_ASSET = "alpine-rootfs.tar.zst"
+    private val VERSION_ASSET = "rootfs-version.txt"
+
+    // Minimum free bytes we want available before starting extraction.
+    // Conservative: rootfs uncompressed is ~150-200 MB; leave headroom.
+    private val MIN_FREE_BYTES = 350L * 1024 * 1024
+
+    // -----------------------------------------------------------------
+    // emitStatus / connect / write / resize / close
+    // -----------------------------------------------------------------
+
+    private fun emitStatus(tabId: String, status: String) {
+        val ev = JSObject().apply {
+            put("tabId", tabId)
+            put("status", status)
+        }
+        notifyListeners("status", ev)
+    }
 
     @PluginMethod
     fun connect(call: PluginCall) {
@@ -50,82 +100,41 @@ class LocalShellPlugin : Plugin() {
             return call.reject("tabId already has a local shell session: $tabId")
         }
 
-        // Phase 1: Android's /system/bin/sh. Tiny toybox shell — usable
-        // for "does the PTY work" smoke testing, not for real work.
-        // Phase 2 will replace argv with proot + alpine.
-        val argv = arrayOf("/system/bin/sh")
-        val filesDir = context.filesDir.absolutePath
-        val env = arrayOf(
-            "PATH=/system/bin:/system/xbin",
-            "TERM=xterm-256color",
-            "HOME=$filesDir",
-            "TMPDIR=${context.cacheDir.absolutePath}",
-            "LC_ALL=C.UTF-8",
-            "LANG=C.UTF-8",
-            "PS1=local$ ",
-        )
-
-        val result = try {
-            Pty.forkPty(argv, env, filesDir, cols, rows)
-        } catch (e: UnsatisfiedLinkError) {
-            // UnsatisfiedLinkError extends Error, not Exception, so the
-            // (String, Exception) reject overload doesn't accept it.
-            return call.reject("native PTY library missing: ${e.message}")
-        } catch (e: Exception) {
-            return call.reject("forkPty exception: ${e.message}", e)
-        }
-
-        if (result.size != 2 || result[0] < 0 || result[1] < 0) {
-            return call.reject("forkPty failed (returned ${result.contentToString()})")
-        }
-
-        val masterFd = result[0]
-        val pid = result[1]
-        val entry = Entry(tabId, pid, masterFd, alive = true)
-        sessions[tabId] = entry
-
-        // Reader thread: drains the master FD and pushes UTF-8
-        // strings back to JS until EOF. On EOF / error we wait for
-        // the child to actually exit so we can report its exit code,
-        // then emit 'exit'.
-        thread(name = "local-pty-$tabId") {
-            val buf = ByteArray(8192)
+        // Connect (extraction + fork) runs on a worker. Resolves the
+        // PluginCall as soon as we have a PID + masterFd; the reader
+        // thread continues streaming data/exit events afterwards.
+        thread(name = "local-connect-$tabId") {
             try {
-                while (entry.alive) {
-                    val n = Pty.readPty(masterFd, buf, buf.size)
-                    if (n <= 0) break
-                    val data = String(buf, 0, n, StandardCharsets.UTF_8)
-                    val ev = JSObject().apply {
-                        put("tabId", tabId)
-                        put("data", data)
-                    }
-                    notifyListeners("data", ev)
+                val argv = prepareArgv(tabId)
+                val env = prepareEnv()
+                val cwd = if (linuxRootfsReady()) "/root" else context.filesDir.absolutePath
+
+                emitStatus(tabId, "Starting shell…")
+                val result = Pty.forkPty(argv, env, cwd, cols, rows)
+                if (result.size != 2 || result[0] < 0 || result[1] < 0) {
+                    call.reject("forkPty failed (returned ${result.contentToString()})")
+                    return@thread
                 }
-            } catch (_: Throwable) {
-                // Connection died — fall through to exit reporting.
-            }
-            val exitCode = try { Pty.waitForExit(pid) } catch (_: Throwable) { -1 }
-            entry.alive = false
-            sessions.remove(tabId)
-            try { Pty.closeFd(masterFd) } catch (_: Throwable) {}
-            val ev = JSObject().apply {
-                put("tabId", tabId)
-                put("exitCode", exitCode)
-            }
-            notifyListeners("exit", ev)
-        }
 
-        if (!initialCommand.isNullOrBlank()) {
-            try {
-                val data = (initialCommand + "\r").toByteArray(StandardCharsets.UTF_8)
-                Pty.writePty(masterFd, data, 0, data.size)
-            } catch (_: Throwable) {}
-        }
+                val entry = Entry(tabId, pid = result[1], masterFd = result[0])
+                sessions[tabId] = entry
+                startReader(entry)
 
-        call.resolve(JSObject().apply { put("tabId", tabId) })
+                if (!initialCommand.isNullOrBlank()) {
+                    try {
+                        val data = (initialCommand + "\r").toByteArray(StandardCharsets.UTF_8)
+                        Pty.writePty(entry.masterFd, data, 0, data.size)
+                    } catch (_: Throwable) {}
+                }
+
+                call.resolve(JSObject().apply { put("tabId", tabId) })
+            } catch (e: UnsatisfiedLinkError) {
+                call.reject("native PTY library missing: ${e.message}")
+            } catch (e: Exception) {
+                call.reject("local shell launch failed: ${e.message}", e)
+            }
+        }
     }
-
-    // ------------------------------------------------------------ write / resize / close
 
     @PluginMethod
     fun write(call: PluginCall) {
@@ -161,9 +170,324 @@ class LocalShellPlugin : Plugin() {
         val entry = sessions[tabId] ?: return call.resolve()
         entry.alive = false
         try { Pty.killPid(entry.pid, 15 /* SIGTERM */) } catch (_: Throwable) {}
-        // Don't close the FD here — let the reader thread observe EOF
-        // naturally and clean up + emit 'exit'. Otherwise we'd race
-        // between two threads closing the same fd.
+        // Reader thread closes the FD once it observes EOF — racing
+        // it here would leak a double-close.
         call.resolve()
+    }
+
+    // -----------------------------------------------------------------
+    // Reader thread — drains the PTY, emits data/exit events
+    // -----------------------------------------------------------------
+
+    private fun startReader(entry: Entry) {
+        thread(name = "local-pty-${entry.tabId}") {
+            val buf = ByteArray(8192)
+            try {
+                while (entry.alive) {
+                    val n = Pty.readPty(entry.masterFd, buf, buf.size)
+                    if (n <= 0) break
+                    val data = String(buf, 0, n, StandardCharsets.UTF_8)
+                    val ev = JSObject().apply {
+                        put("tabId", entry.tabId)
+                        put("data", data)
+                    }
+                    notifyListeners("data", ev)
+                }
+            } catch (_: Throwable) {
+                // Connection died — fall through to exit reporting.
+            }
+            val exitCode = try { Pty.waitForExit(entry.pid) } catch (_: Throwable) { -1 }
+            entry.alive = false
+            sessions.remove(entry.tabId)
+            try { Pty.closeFd(entry.masterFd) } catch (_: Throwable) {}
+            val ev = JSObject().apply {
+                put("tabId", entry.tabId)
+                put("exitCode", exitCode)
+            }
+            notifyListeners("exit", ev)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // argv / env selection: bundled Alpine if available, else fallback
+    // -----------------------------------------------------------------
+
+    private fun prepareArgv(tabId: String): Array<String> {
+        return if (hasBundledRootfs()) {
+            ensureLinuxBootstrapped(tabId)
+            if (linuxRootfsReady()) {
+                bundledArgv()
+            } else {
+                emitStatus(tabId, "Falling back to /system/bin/sh (extraction failed)")
+                fallbackArgv()
+            }
+        } else {
+            // No bundle in the APK (e.g., dev build, or CI's rootfs
+            // step was skipped). Quietly use the system shell.
+            fallbackArgv()
+        }
+    }
+
+    private fun bundledArgv(): Array<String> {
+        val proot = File(context.filesDir, PROOT_ASSET).absolutePath
+        val rootfs = linuxDir().absolutePath
+        // -0           — fake uid 0 inside the guest. Almost everything
+        //                Alpine ships expects root-ish behavior.
+        // -w /root     — start in /root with the .profile we baked in.
+        // -b /dev etc. — expose host kernel interfaces the guest needs.
+        // -b /sdcard   — let the user reach their phone's shared
+        //                storage when present. Skipped on devices that
+        //                don't expose it to avoid a noisy proot warning.
+        val args = mutableListOf(
+            proot,
+            "-r", rootfs,
+            "-w", "/root",
+            "-0",
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+        )
+        if (File("/sdcard").exists()) {
+            args.add("-b"); args.add("/sdcard")
+        }
+        args.addAll(listOf("/bin/sh", "-l"))
+        return args.toTypedArray()
+    }
+
+    private fun fallbackArgv(): Array<String> = arrayOf("/system/bin/sh")
+
+    private fun prepareEnv(): Array<String> {
+        val filesDir = context.filesDir.absolutePath
+        val cacheDir = context.cacheDir.absolutePath
+        return arrayOf(
+            // PATH inside the guest is set by /etc/profile + .profile;
+            // the host-side PATH here only matters until proot hands
+            // off to /bin/sh -l.
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/system/bin:/system/xbin",
+            "TERM=xterm-256color",
+            "HOME=$filesDir",
+            "TMPDIR=$cacheDir",
+            "LC_ALL=C.UTF-8",
+            "LANG=C.UTF-8",
+            // Tell proot where to put its own internal sockets etc.
+            "PROOT_TMP_DIR=$cacheDir",
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // Bundle detection + bootstrap
+    // -----------------------------------------------------------------
+
+    private fun hasBundledRootfs(): Boolean {
+        return try {
+            context.assets.list("")?.let { entries ->
+                entries.contains(ROOTFS_ASSET) && entries.contains(PROOT_ASSET)
+            } ?: false
+        } catch (_: Exception) { false }
+    }
+
+    private fun linuxDir(): File = File(context.filesDir, "linux")
+
+    private fun markerFile(): File {
+        val version = bundledVersion()
+        return File(context.filesDir, "linux-ready.$version")
+    }
+
+    private fun linuxRootfsReady(): Boolean {
+        if (!hasBundledRootfs()) return false
+        return markerFile().exists() && linuxDir().isDirectory &&
+            File(context.filesDir, PROOT_ASSET).canExecute()
+    }
+
+    private fun bundledVersion(): String {
+        return try {
+            context.assets.open(VERSION_ASSET).use { it.bufferedReader().readText().trim() }
+        } catch (_: Exception) { "unknown" }
+    }
+
+    private fun ensureLinuxBootstrapped(tabId: String) {
+        if (linuxRootfsReady()) return
+        if (bootstrapInProgress.get()) {
+            emitStatus(tabId, "Waiting for another tab to finish first-launch setup…")
+        }
+        // synchronized() blocks the second caller until the first
+        // returns; after that, linuxRootfsReady() short-circuits.
+        synchronized(bootstrapLock) {
+            if (linuxRootfsReady()) return
+            bootstrapInProgress.set(true)
+            try {
+                runBootstrap(tabId)
+            } catch (e: Exception) {
+                emitStatus(tabId, "Bootstrap failed: ${e.message}")
+                // Best-effort cleanup so the next attempt isn't poisoned
+                // by partial state.
+                try { linuxDir().deleteRecursively() } catch (_: Exception) {}
+                try { markerFile().delete() } catch (_: Exception) {}
+            } finally {
+                bootstrapInProgress.set(false)
+            }
+        }
+    }
+
+    private fun runBootstrap(tabId: String) {
+        emitStatus(tabId, "Setting up Linux environment (first launch, ~30s)…")
+
+        // Disk-space sanity check up front. Better to fail loudly than
+        // to mid-extract a half-rootfs and confuse the user.
+        val stat = StatFs(context.filesDir.absolutePath)
+        val free = stat.availableBytes
+        if (free < MIN_FREE_BYTES) {
+            throw IllegalStateException(
+                "need ${MIN_FREE_BYTES / (1024 * 1024)} MB free, only " +
+                    "${free / (1024 * 1024)} MB available"
+            )
+        }
+
+        // 1. Copy proot binary out of the APK. AssetManager.open() returns
+        //    a synthetic stream; we drop it onto disk and chmod 0o755.
+        emitStatus(tabId, "Extracting PRoot binary…")
+        val prootFile = File(context.filesDir, PROOT_ASSET)
+        if (!prootFile.exists() || !prootFile.canExecute()) {
+            context.assets.open(PROOT_ASSET).use { input ->
+                FileOutputStream(prootFile).use { output -> input.copyTo(output) }
+            }
+            try {
+                Os.chmod(prootFile.absolutePath, 0b111_101_101)  // 0o755
+            } catch (e: Exception) {
+                if (!prootFile.setExecutable(true, /*ownerOnly=*/false)) {
+                    throw IllegalStateException("chmod +x failed on proot binary: ${e.message}")
+                }
+            }
+        }
+
+        // 2. Stream the rootfs tar.zst into linuxDir/.
+        emitStatus(tabId, "Extracting Alpine rootfs (this is the slow part)…")
+        val target = linuxDir()
+        // Clean target if any stale partial extraction is lying around.
+        if (target.exists()) {
+            target.deleteRecursively()
+        }
+        target.mkdirs()
+        extractRootfs(target, tabId)
+
+        // 3. Write readiness marker once the dust settles.
+        markerFile().writeText(System.currentTimeMillis().toString())
+        emitStatus(tabId, "Linux environment ready.")
+    }
+
+    /**
+     * Streams `assets/alpine-rootfs.tar.zst` through zstd → tar →
+     * filesystem. Reports a percentage in status events at ~1-second
+     * intervals so the JS terminal shows live progress instead of
+     * appearing frozen for 20 seconds.
+     */
+    private fun extractRootfs(target: File, tabId: String) {
+        // openFd succeeds only if AAPT kept the asset uncompressed,
+        // which the `noCompress 'zst'` patch in android-init.js ensures.
+        // If that ever regresses, fall back to "unknown total" rather
+        // than failing the whole extraction.
+        val totalCompressed: Long = try {
+            context.assets.openFd(ROOTFS_ASSET).use { it.length }
+        } catch (_: Exception) { -1L }
+
+        val absRoot = target.canonicalPath
+        var lastReportMs = 0L
+        var entryCount = 0
+
+        // CountingInputStream so we know how far through the .zst we are.
+        // Apache commons-compress also has this but we want a small
+        // dependency footprint — Java's FilterInputStream is fine.
+        val rawIn = BufferedInputStream(
+            context.assets.open(ROOTFS_ASSET, AssetManager.ACCESS_STREAMING)
+        )
+        val counter = CountingInputStream(rawIn)
+        val zstdIn = ZstdInputStream(counter)
+        val tarIn = TarArchiveInputStream(zstdIn)
+
+        tarIn.use { tar ->
+            var entry: TarArchiveEntry? = tar.nextEntry
+            while (entry != null) {
+                val outPath = File(target, entry.name)
+                // Defensive: tar can carry "../" paths. Refuse anything
+                // that would escape target/.
+                val canon = outPath.canonicalPath
+                if (!canon.startsWith(absRoot)) {
+                    throw IllegalStateException("rootfs tar contains escape path: ${entry.name}")
+                }
+
+                when {
+                    entry.isDirectory -> outPath.mkdirs()
+                    entry.isSymbolicLink -> {
+                        // proot rebases /, so absolute symlinks INSIDE
+                        // the rootfs (e.g. /sbin -> /bin/busybox) work
+                        // out. We just create them verbatim.
+                        outPath.parentFile?.mkdirs()
+                        try {
+                            if (outPath.exists()) outPath.delete()
+                            Os.symlink(entry.linkName, outPath.absolutePath)
+                        } catch (_: Exception) {
+                            // Symlinks are best-effort; some scenarios
+                            // (existing dir, restricted FS) leave us
+                            // without one and that's still usually OK.
+                        }
+                    }
+                    entry.isFile -> {
+                        outPath.parentFile?.mkdirs()
+                        FileOutputStream(outPath).use { out -> tar.copyTo(out) }
+                        // Preserve the full mode where possible —
+                        // important for /bin/sh, /bin/busybox,
+                        // /usr/bin/node, etc.
+                        val mode = entry.mode and 0xFFF
+                        try {
+                            Os.chmod(outPath.absolutePath, mode)
+                        } catch (_: Exception) {
+                            if (mode and 0b001_001_001 != 0) {  // any exec bit
+                                outPath.setExecutable(true, /*ownerOnly=*/false)
+                            }
+                        }
+                    }
+                    // Skip char/block devices, fifos — proot would
+                    // refuse them anyway.
+                }
+                entryCount++
+
+                val now = System.currentTimeMillis()
+                if (now - lastReportMs > 1000) {
+                    lastReportMs = now
+                    if (totalCompressed > 0) {
+                        val pct = (counter.bytesRead * 100 / totalCompressed)
+                            .coerceIn(0, 99)
+                        emitStatus(tabId, "Extracting Alpine rootfs… ${pct}% ($entryCount files)")
+                    } else {
+                        emitStatus(tabId, "Extracting Alpine rootfs… ($entryCount files)")
+                    }
+                }
+                entry = tar.nextEntry
+            }
+        }
+        emitStatus(tabId, "Extracted $entryCount entries from rootfs.")
+    }
+
+    /**
+     * Trivial counter so we can report extraction progress without
+     * pulling commons-io for CountingInputStream.
+     */
+    private class CountingInputStream(private val inner: InputStream) : InputStream() {
+        @Volatile var bytesRead: Long = 0L
+            private set
+
+        override fun read(): Int {
+            val b = inner.read()
+            if (b >= 0) bytesRead++
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val n = inner.read(b, off, len)
+            if (n > 0) bytesRead += n
+            return n
+        }
+
+        override fun close() { inner.close() }
     }
 }

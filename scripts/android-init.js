@@ -217,12 +217,23 @@ function patchAppGradle() {
 
   // Insert our deps inside the existing `dependencies { … }` block.
   // We use a marker comment so re-runs don't duplicate the lines.
+  //
+  //   sshj                — remote SSH (SshPlugin)
+  //   androidx.core-ktx   — NotificationCompat for ForegroundService
+  //   zstd-jni            — decompress assets/alpine-rootfs.tar.zst on
+  //                         first launch of a local Linux session
+  //   commons-compress    — TarArchiveInputStream for the same flow
+  //                         (writing a tar parser by hand is doable
+  //                         but commons-compress handles longlink /
+  //                         posix headers / sparse files correctly)
   const MARKER = '// claude-sessions: native deps';
   if (!g.includes(MARKER)) {
     const inject = `
     ${MARKER}
     implementation 'com.hierynomus:sshj:0.39.0'
     implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'com.github.luben:zstd-jni:1.5.6-3@aar'
+    implementation 'org.apache.commons:commons-compress:1.26.2'
     `;
     g = g.replace(/dependencies\s*\{/, (m) => `${m}\n${inject}`);
   }
@@ -258,6 +269,23 @@ function patchAppGradle() {
         }
     }
     ndkVersion '26.1.10909125'
+`);
+  }
+
+  // Tell AAPT not to recompress the bundled Linux env assets. The tar
+  // is zstd-compressed already; re-zipping it costs APK install time
+  // for zero size win. proot-arm64 is a stripped ELF — also doesn't
+  // benefit from deflate. Keeping them uncompressed inside the APK
+  // also lets AssetManager return a real fd (openFd) so the plugin
+  // can stream-extract without buffering the whole 50 MB in RAM.
+  const NOCOMPRESS_MARKER = '// claude-sessions: noCompress linux assets';
+  if (!g.includes(NOCOMPRESS_MARKER)) {
+    g = g.replace(/android\s*\{/, (m) => `${m}
+    ${NOCOMPRESS_MARKER}
+    androidResources {
+        noCompress 'zst'
+        noCompress 'tar.zst'
+    }
 `);
   }
 

@@ -16,6 +16,7 @@
 
   const dataListeners = new Set();
   const exitListeners = new Set();
+  const statusListeners = new Set();
 
   if (SHELL) {
     SHELL.addListener('data', (ev) => {
@@ -23,6 +24,12 @@
     });
     SHELL.addListener('exit', (ev) => {
       for (const cb of exitListeners) { try { cb(ev); } catch (_) {} }
+    });
+    // status events fire during the first-run bootstrap (extracting
+    // proot + alpine rootfs) and on the final shell launch, so the
+    // user sees live progress instead of staring at "[starting…]".
+    SHELL.addListener('status', (ev) => {
+      for (const cb of statusListeners) { try { cb(ev); } catch (_) {} }
     });
   }
 
@@ -52,5 +59,6 @@
 
     onData(cb) { dataListeners.add(cb); return () => dataListeners.delete(cb); },
     onExit(cb) { exitListeners.add(cb); return () => exitListeners.delete(cb); },
+    onStatus(cb) { statusListeners.add(cb); return () => statusListeners.delete(cb); },
   };
 })();

@@ -78,34 +78,54 @@ function sessionInstanceCount(sessionId) {
 async function loadSessions() {
   const arr = (await Store.get(KEY_SESSIONS)) || [];
   sessions = Array.isArray(arr) ? arr : [];
-  // First-run seed. We bias toward "Termux on this phone" because the
-  // most common setup is Claude Sessions + Termux side-by-side: Termux
-  // runs sshd on localhost:8022, our APK connects to it for a "real
-  // Linux on the phone" tab. Users with a VPS can edit / clone this
-  // entry. Once they have ANY saved session this seed never runs again.
+  // First-run seed. The APK now bundles its own Alpine Linux + proot
+  // + claude-code, so the default tap-to-launch session uses the
+  // built-in local shell rather than reaching out for Termux or a VPS.
+  // Either alternative remains one Edit away.
   if (!sessions.length) {
     sessions = [
       {
         id: newPersistentId(),
-        name: 'Termux (this phone)',
-        host: '127.0.0.1',
-        port: 8022,
+        name: 'Local Linux (bundled)',
+        type: 'local',
+        host: '',
+        port: 22,
         username: '',
         authType: 'password',
         password: '',
         privateKey: '',
         privateKeyPassphrase: '',
         port_forwards: '',
-        persistent: true,
+        persistent: false,         // tmux-on-phone is a Phase 4+ story
         working_dir: '',
         pre_command: '',
         claude_cmd: '',
         claude_args: '',
-        description: 'Tap Edit and fill username (run `whoami` in Termux) + password (`passwd` in Termux). See docs/TERMUX-SETUP.md.',
+        description: 'Tap Launch to open an Alpine Linux shell on this phone. First launch extracts the bundled rootfs (~30s).',
+      },
+      {
+        id: newPersistentId(),
+        name: 'Local Linux + claude',
+        type: 'local',
+        host: '',
+        port: 22,
+        username: '',
+        authType: 'password',
+        password: '',
+        privateKey: '',
+        privateKeyPassphrase: '',
+        port_forwards: '',
+        persistent: false,
+        working_dir: '',
+        pre_command: '',
+        claude_cmd: 'claude',
+        claude_args: '',
+        description: 'Same as above, but auto-starts the claude CLI after the shell opens.',
       },
       {
         id: newPersistentId(),
         name: 'Example VPS',
+        type: 'ssh',
         host: '',
         port: 22,
         username: 'root',
@@ -896,15 +916,18 @@ SshBridge.onWarning((ev) => {
 });
 
 // Phase markers during connect so the user knows we're not frozen
-// when sshj's TCP / auth handshakes take a while.
-SshBridge.onStatus((ev) => {
+// when sshj's TCP / auth handshakes take a while, or while the
+// local-shell bootstrap is extracting Alpine on first launch.
+function onAnyStatus(ev) {
   const tab = tabs.find((t) => t.id === ev.tabId);
   if (!tab) return;
   // "Ready" is the last status before the shell takes over — don't
   // print it (the prompt itself signals readiness).
   if (ev.status === 'Ready') return;
   tab.term.write(`\x1b[90m[${ev.status}]\x1b[0m\r\n`);
-});
+}
+SshBridge.onStatus(onAnyStatus);
+LocalShellBridge.onStatus(onAnyStatus);
 
 // ============================================================================
 // Keyboard handlers (Ctrl-arm, copy, paste, close)
@@ -1264,6 +1287,9 @@ $('#editor-cancel').addEventListener('click', closeEditor);
 $('#editor-form').addEventListener('submit', saveEditor);
 document.querySelectorAll('#editor-form input[name="authType"]').forEach((el) => {
   el.addEventListener('change', updateAuthVisibility);
+});
+document.querySelectorAll('#editor-form input[name="type"]').forEach((el) => {
+  el.addEventListener('change', updateTypeVisibility);
 });
 
 // Show/hide toggle for password + passphrase fields. The button stays

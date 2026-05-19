@@ -59,6 +59,37 @@ jobs:
       - name: Initialize / sync Android project
         run: npm run android:init
 
+      - name: Set up QEMU
+        # Needed by docker buildx --platform=linux/arm64 in the next
+        # step so the rootfs / proot build runs inside an arm64 container
+        # emulated on this x86_64 runner.
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache prebuilt static proot-arm64
+        # Static-linking PRoot under QEMU takes ~5-10 min and the result
+        # is content-addressable on the PROOT_REF + Alpine version. Cache
+        # so subsequent main pushes only pay the rootfs build cost.
+        id: cache-proot
+        uses: actions/cache@v4
+        with:
+          path: android/app/src/main/assets/proot-arm64
+          key: proot-arm64-v5.4.0-alpine3.20-v2
+
+      - name: Build Alpine rootfs + PRoot (bundled Linux env)
+        # Produces android/app/src/main/assets/{proot-arm64,
+        # alpine-rootfs.tar.zst,rootfs-version.txt} which then get
+        # packaged into the APK by gradle in the next step. End-to-end
+        # ~10-15 min on a cold cache (~3-5 min when proot is cached).
+        run: bash scripts/build-alpine-rootfs.sh
+        env:
+          PROOT_REF: v5.4.0
+          ALPINE_VERSION: '3.20'
+
       - name: Build debug APK
         working-directory: android
         run: ./gradlew --no-daemon assembleDebug
