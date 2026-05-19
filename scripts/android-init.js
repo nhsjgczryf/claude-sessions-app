@@ -400,6 +400,73 @@ function patchManifest() {
 }
 
 // ---------------------------------------------------------------------
+// 6. Lower targetSdkVersion to 28
+// ---------------------------------------------------------------------
+//
+// Android 10+ (targetSdk ≥ 29) enforces a SELinux policy that denies
+// `execute` on files labeled `app_data_file:s0` from the
+// `untrusted_app` domain. Translation: at targetSdk 29+ we can't
+// exec(2) the proot binary we wrote to filesDir, nor can proot then
+// re-exec /bin/sh from inside the bundled rootfs. Both fail with
+// EACCES ("Permission denied"), which manifested on the first user
+// test as:
+//
+//   [pty] exec /data/user/0/.../files/proot-arm64 failed: Permission
+//         denied
+//   [Session ended (exit 127)]
+//
+// Termux, UserLAnd, AnLinux, and every other "Linux on Android" app
+// pin targetSdkVersion to 28 to opt out of this restriction. We do
+// the same here — it's the only path that keeps the WHOLE rootfs
+// usable, not just the proot binary.
+//
+// Side effects of targetSdk 28 we accept:
+//   - No scoped storage on Android 10+ (we don't use external
+//     storage from the APK directly; users access /sdcard through
+//     the proot bind mount).
+//   - FOREGROUND_SERVICE_DATA_SYNC subtype isn't enforced (it's only
+//     required at targetSdk ≥ 34). We leave the permission declared
+//     so Android 14+ behaves nicely if we ever raise the target.
+//   - Notification channels still work (we use NotificationCompat).
+//
+// Capacitor 7 stores SDK levels in android/variables.gradle as
+// `ext.targetSdkVersion`. app/build.gradle references it via
+// rootProject.ext.targetSdkVersion, so patching variables.gradle is
+// the canonical lever.
+
+function patchTargetSdk() {
+  const variablesGradle = path.join(ANDROID, 'variables.gradle');
+  const appGradle = path.join(ANDROID, 'app', 'build.gradle');
+
+  // Primary lever: variables.gradle (Capacitor 7's convention).
+  if (fs.existsSync(variablesGradle)) {
+    let v = fs.readFileSync(variablesGradle, 'utf8');
+    const before = v;
+    v = v.replace(/targetSdkVersion\s*=\s*\d+/g, 'targetSdkVersion = 28');
+    if (v !== before) {
+      fs.writeFileSync(variablesGradle, v);
+      console.log('[android-init] patched android/variables.gradle: targetSdkVersion = 28');
+      return;
+    }
+  }
+
+  // Fallback: write targetSdkVersion directly into app/build.gradle.
+  // We force it via an `override`-style approach: an explicit line
+  // inside defaultConfig wins over the rootProject.ext reference.
+  if (fs.existsSync(appGradle)) {
+    let g = fs.readFileSync(appGradle, 'utf8');
+    const MARKER = '// claude-sessions: targetSdk pin';
+    if (g.includes(MARKER)) return;
+    g = g.replace(/defaultConfig\s*\{/, (m) => `${m}
+        ${MARKER}
+        targetSdkVersion 28
+`);
+    fs.writeFileSync(appGradle, g);
+    console.log('[android-init] patched app/build.gradle: targetSdkVersion 28');
+  }
+}
+
+// ---------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------
 
@@ -409,6 +476,7 @@ copyNativeSources();
 patchProjectGradle();
 patchAppGradle();
 patchManifest();
+patchTargetSdk();
 
 // One more cap sync now that natives are in place so Capacitor's
 // plugin discovery picks them up before gradle runs.

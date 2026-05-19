@@ -76,9 +76,21 @@ html, body {
   user-select: none;
 }
 
+/* viewport-fit=cover (set in <meta>) lets the WebView extend into the
+ * status-bar area on Android. Without these inset paddings the tab
+ * bar — and especially the close-X buttons — sit underneath the
+ * status bar, where Android grabs taps as "pull-down notification
+ * shade" gestures instead of forwarding them to the WebView. Same
+ * story on the bottom for gesture-nav phones.
+ *
+ * Use env() with a 0 fallback so this is a no-op on desktop / older
+ * browsers that don't expose safe-area insets. */
 body {
   display: flex;
   height: 100vh;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 button {
@@ -153,11 +165,13 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 #sidebar-resizer.dragging { background: var(--accent); }
 #sidebar-resizer.hidden { display: none; }
 
-/* Floating expand button shown when sidebar is collapsed */
+/* Floating expand button shown when sidebar is collapsed.
+ * position:fixed bypasses the body's safe-area padding, so we add the
+ * inset back manually here. */
 .icon-btn.floating {
   position: fixed;
-  top: 8px;
-  left: 8px;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: calc(8px + env(safe-area-inset-left, 0px));
   z-index: 10;
   width: 24px;
   height: 24px;
