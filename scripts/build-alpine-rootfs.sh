@@ -141,14 +141,31 @@ RUN apk add --no-cache \
 # doesn't blow the RUN layer.
 RUN (update-ca-certificates 2>/dev/null || true)
 
-# npm install -g claude-code. We don't bail if this fails — the rest
-# of the rootfs is still useful, and the user can re-run `npm i -g
-# @anthropic-ai/claude-code` from inside the shell later.
+# Configure npm. fund/audit/update-notifier silenced to keep the
+# build log readable under QEMU; they don't affect installation.
 RUN npm config set fund false \
  && npm config set audit false \
- && npm config set update-notifier false \
- && (npm install -g $NPM_INSTALL || echo "WARN: npm install failed; rootfs ships without claude-code") \
- && (npm cache clean --force || true)
+ && npm config set update-notifier false
+
+# Install claude-code into a known global location and validate.
+# Previously this step was guarded with `|| echo WARN` so install
+# failures were silently swallowed; the resulting rootfs shipped
+# without /usr/local/bin/claude. We now hard-fail the build on
+# install/validation errors so the CI log surfaces the actual npm
+# error instead of a late "claude: not found" on-device.
+#
+# The diagnostic block prints npm's chosen prefix and what binaries
+# actually got created, so the next time something breaks we know
+# whether it's a path issue vs a postinstall vs a package-not-found.
+RUN set -ex \
+ && echo "node: $(node -v)  npm: $(npm -v)  prefix: $(npm config get prefix)" \
+ && npm install -g $NPM_INSTALL \
+ && echo "--- $(npm config get prefix)/bin after install ---" \
+ && ls -la "$(npm config get prefix)/bin/" \
+ && command -v claude \
+ && claude --version
+RUN (npm cache clean --force || true) \
+ && (rm -rf /root/.npm || true)
 
 # Trim ~30 MB of dead weight before tarring
 RUN rm -rf \

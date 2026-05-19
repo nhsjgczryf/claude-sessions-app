@@ -21,14 +21,39 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.File
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
+import java.security.Security
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
 @CapacitorPlugin(name = "SSH")
 class SshPlugin : Plugin() {
+
+    companion object {
+        // Android ships its own partial BouncyCastle under the same
+        // "BC" provider name (the AndroidKeyStoreBCWorkaround variant).
+        // That partial provider is missing several modern algorithms
+        // including X25519, which means sshj's curve25519-sha256 KEX —
+        // the default for any OpenSSH 7.0+ server — fails with:
+        //
+        //   TransportException: no such algorithm: X25519 for provider BC
+        //
+        // Fix: swap Android's partial BC out for the full provider
+        // shipped in the sshj-transitive bcprov-jdk18on jar. Once. The
+        // companion-object init runs the first time SshPlugin is
+        // referenced, well before any connect() call.
+        init {
+            try {
+                Security.removeProvider("BC")
+                Security.insertProviderAt(BouncyCastleProvider(), 1)
+            } catch (e: Throwable) {
+                android.util.Log.e("SshPlugin", "BC provider swap failed: ${e.message}", e)
+            }
+        }
+    }
 
     private data class Entry(
         val tabId: String,
