@@ -68,7 +68,9 @@ class LocalShellPlugin : Plugin() {
         val result = try {
             Pty.forkPty(argv, env, filesDir, cols, rows)
         } catch (e: UnsatisfiedLinkError) {
-            return call.reject("native PTY library missing: ${e.message}", e)
+            // UnsatisfiedLinkError extends Error, not Exception, so the
+            // (String, Exception) reject overload doesn't accept it.
+            return call.reject("native PTY library missing: ${e.message}")
         } catch (e: Exception) {
             return call.reject("forkPty exception: ${e.message}", e)
         }
