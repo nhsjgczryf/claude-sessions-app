@@ -920,40 +920,71 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 
 /* ============================================================
- * Android WebView IME workaround
+ * Android WebView IME workaround for xterm.js helper-textarea
  *
- * xterm.js parks its hidden helper-textarea at `left: -9999em` so
- * the cursor can stay focused without the textarea being visible.
- * Chrome desktop / mobile Chrome / Firefox all dispatch IME
- * composition events to it just fine. Android WebView, however,
- * does an "is this element actually on-screen?" check before
- * forwarding compositionstart/update/end from its InputConnection
- * to the DOM — and the way it implements that check, anything
- * positioned outside the viewport gets silently skipped.
+ * xterm.js parks its hidden helper-textarea at `left: -9999em;
+ * width: 0; height: 0; padding: 0` so the cursor stays focused
+ * without the textarea visible. Chrome desktop / mobile Chrome /
+ * Firefox dispatch IME composition events to it just fine.
+ * Android WebView does NOT — IMEs (QQ Pinyin, Sogou, Gboard
+ * Chinese, Rime, Baidu) check whether the textarea is "available"
+ * for composition by measuring  width + padding-left + padding-
+ * right + border-left + border-right.  If that total is 0, they
+ * decide the textarea isn't a real input and silently refuse to
+ * fire compositionstart/update/end on it. Typing Chinese then
+ * appears to commit (the candidate popup closes) but no event
+ * reaches the DOM, term.onData never fires, and the PTY sees
+ * nothing.
  *
- * Symptom: typing Chinese (or any IME-composed text) in the APK
- * works in Win/web/SSH-from-Termux but produces literally nothing
- * inside the APK's terminal, even in plain bash. The compositionend
- * event never fires, so xterm.js never calls onData, so we never
- * write anything to the PTY.
+ * Reference: xterm.js PR #3251 fixed this for QQ Pinyin + Rime
+ * by ensuring the textarea has non-zero bounding-box size. The
+ * fix landed in CompositionHelper.ts (Math.max(width,1)) but
+ * only DURING active composition; for the IME's INITIAL "is
+ * this textarea worth attaching to?" probe, the CSS default
+ * still has size 0. We force a non-zero default here.
  *
- * Fix: keep the textarea on-screen but visually inert. opacity 0
- * hides it; pointer-events:none stops it from eating touches that
- * should go to the canvas; z-index:-5 keeps it behind the cursor
- * layer. xterm.js still moves it to the cursor position during
- * composition (v6+ behavior) so the IME's candidate popup anchors
- * sensibly.
+ * Symptom checklist this addresses:
+ *   - Typing Chinese in plain bash → no chars appear
+ *   - IME candidate popup positioned weirdly (top-left of screen)
+ *   - All other browsers and clients work; only the APK breaks
+ *
+ * What changed and why:
+ *   left: 0; top: 0        — bring on-screen for WebView's
+ *                            visibility heuristic.
+ *   width: 1ch !important  — non-zero so IME thinks it's a real
+ *   height: 1em            input. !important so xterm.css's
+ *                            `width: 0` can't put it back.
+ *   padding: 0 1px         — width-budget contribution; the IME
+ *                            availability check sums this in.
+ *                            Vertical padding stays 0 so the
+ *                            tiny invisible textarea doesn't
+ *                            push terminal content down a pixel.
+ *   min-width: 1px         — belt-and-suspenders for the same
+ *                            availability check.
+ *   opacity: 0             — keep it invisible.
+ *   z-index: -5            — sit behind the canvas so it can't
+ *                            block touches; combined with the
+ *                            terminal renderer being on top this
+ *                            is enough — we deliberately do NOT
+ *                            set pointer-events: none, since
+ *                            Android WebView's IME has been
+ *                            observed to skip InputConnection
+ *                            attachment for elements marked as
+ *                            non-interactive.
+ *
+ * No !important on left/top: xterm.js v6's CompositionHelper
+ * sets those inline during active composition to anchor the IME
+ * candidate popup at the cursor, and we want that path to win.
  */
-/* No !important on left/top: xterm.js v6's CompositionHelper sets
- * those inline during active composition to anchor the IME candidate
- * popup at the cursor, and we want that to win. Same-selector
- * source-order is enough to override xterm.css's `left: -9999em`. */
 .xterm-helper-textarea {
   left: 0;
   top: 0;
   width: 1ch !important;
   height: 1em !important;
+  min-width: 1px !important;
+  min-height: 1px !important;
+  padding: 0 1px !important;
+  border: 0 !important;
   opacity: 0 !important;
-  pointer-events: none !important;
   z-index: -5 !important;
 }
