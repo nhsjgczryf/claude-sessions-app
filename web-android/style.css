@@ -738,7 +738,11 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 .auth-loading.hidden { display: none; }
 
 /* =========================================== Mobile / narrow viewport */
-@media (max-width: 600px) {
+/* Cover BOTH "narrow viewport" (phone portrait) AND "primary input
+ * is touch" (tablet landscape, big phones, anything with no precise
+ * pointer). Tablets >600px width were missing the bigger touch
+ * targets because they only matched the width arm. */
+@media (max-width: 600px), (pointer: coarse) {
   body { font-size: 14px; }
 
   /* On phones the sidebar covers the whole screen as an overlay so

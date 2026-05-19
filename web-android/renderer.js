@@ -446,6 +446,15 @@ async function launchSession(sessionId, opts) {
     openEditor(sessionId);
     return;
   }
+  // Loud, in-your-face diagnostic when the native SSH plugin didn't
+  // register. Without this the connect silently no-ops and the user
+  // is left staring at "[connecting…]" forever. See ssh-bridge.js
+  // for what gates 'available'.
+  if (!SshBridge.available) {
+    notify('Native SSH plugin not loaded — APK build is broken.', 'error');
+    // Continue anyway so they see the placeholder terminal & can
+    // file a bug report with the visible message.
+  }
 
   const tabId = (opts && opts.persistentId) || newPersistentId();
   const existing = sessionInstanceCount(sessionId);
@@ -495,6 +504,12 @@ async function launchSession(sessionId, opts) {
   });
   attachKeyboardHandlers(tab);
 
+  if (!SshBridge.available) {
+    term.write(
+      `\r\n\x1b[31m[FATAL] Capacitor SSH plugin not loaded — APK is missing the\r\n` +
+      `        native module. Open an issue with the APK version code.\r\n\x1b[0m`,
+    );
+  }
   term.write(`\x1b[90m[connecting ${session.username}@${session.host}…]\x1b[0m\r\n`);
 
   // tmux name disambiguation: when this is the Nth tab for the same

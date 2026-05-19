@@ -104,34 +104,59 @@ function patchMainActivity(pkgDir) {
   // Capacitor 7 only auto-discovers plugins shipped via npm. For
   // locally-added @CapacitorPlugin classes we have to call
   // registerPlugin() explicitly in MainActivity.onCreate(). The
-  // generated MainActivity is tiny (extends BridgeActivity with no
-  // body); we rewrite it idempotently if it doesn't already do the
-  // registration.
-  const main = path.join(pkgDir, 'MainActivity.kt');
-  if (!fs.existsSync(main)) {
-    console.warn(`[android-init] no MainActivity.kt at ${main}; plugin won't be registered`);
-    return;
-  }
-  const current = fs.readFileSync(main, 'utf8');
-  if (current.includes('registerPlugin(SshPlugin::class.java)')) return;
+  // generated MainActivity may be either Java or Kotlin depending
+  // on the Capacitor version — handle both.
+  const ktPath = path.join(pkgDir, 'MainActivity.kt');
+  const javaPath = path.join(pkgDir, 'MainActivity.java');
 
-  const replacement = `package ${APP_PACKAGE}
+  if (fs.existsSync(ktPath)) {
+    const current = fs.readFileSync(ktPath, 'utf8');
+    if (current.includes('registerPlugin(SshPlugin::class.java)')) return;
+    const replacement = `package ${APP_PACKAGE}
 
 import android.os.Bundle
 import com.getcapacitor.BridgeActivity
 
 class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Register the locally-defined SSH plugin before Capacitor's
-        // bridge initializes so the WebView sees Capacitor.Plugins.SSH
-        // immediately on first paint.
+        // Register the locally-defined SSH plugin BEFORE the bridge
+        // initializes so the WebView sees Capacitor.Plugins.SSH on
+        // first paint.
         registerPlugin(SshPlugin::class.java)
         super.onCreate(savedInstanceState)
     }
 }
 `;
-  fs.writeFileSync(main, replacement);
-  console.log('[android-init] patched MainActivity.kt to register SshPlugin');
+    fs.writeFileSync(ktPath, replacement);
+    console.log('[android-init] patched MainActivity.kt to register SshPlugin');
+    return;
+  }
+
+  if (fs.existsSync(javaPath)) {
+    const current = fs.readFileSync(javaPath, 'utf8');
+    if (current.includes('registerPlugin(SshPlugin.class)')) return;
+    const replacement = `package ${APP_PACKAGE};
+
+import android.os.Bundle;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        // Register the locally-defined SSH plugin BEFORE the bridge
+        // initializes so the WebView sees Capacitor.Plugins.SSH on
+        // first paint.
+        registerPlugin(SshPlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}
+`;
+    fs.writeFileSync(javaPath, replacement);
+    console.log('[android-init] patched MainActivity.java to register SshPlugin');
+    return;
+  }
+
+  console.warn(`[android-init] no MainActivity.{kt,java} at ${pkgDir}; plugin won't be registered`);
 }
 
 // ---------------------------------------------------------------------
@@ -145,6 +170,22 @@ function patchAppGradle() {
     return;
   }
   let g = fs.readFileSync(buildGradle, 'utf8');
+
+  // Apply kotlin-android plugin so our .kt files in android-native/
+  // actually compile. Capacitor 7's `cap add android` doesn't enable
+  // Kotlin in the app module by default — without this, .kt files
+  // are silently skipped at compile time and SshPlugin never makes
+  // it into the APK (the WebView then has no Capacitor.Plugins.SSH
+  // and ssh-bridge.js falls back to no-op stubs).
+  const KOTLIN_PLUGIN_MARKER = 'claude-sessions: apply kotlin';
+  if (!g.includes(KOTLIN_PLUGIN_MARKER) && !g.includes("apply plugin: 'kotlin-android'")) {
+    const inject = `\n// ${KOTLIN_PLUGIN_MARKER}\napply plugin: 'kotlin-android'\n`;
+    if (g.match(/apply plugin:\s*'com\.android\.application'/)) {
+      g = g.replace(/apply plugin:\s*'com\.android\.application'/, (m) => `${m}${inject}`);
+    } else {
+      g = inject + g;
+    }
+  }
 
   // versionName from package.json + date-based versionCode so every CI
   // run gets a strictly higher number.
@@ -212,6 +253,48 @@ function patchAppGradle() {
 }
 
 // ---------------------------------------------------------------------
+// 4b. Project-level build.gradle — Kotlin gradle plugin classpath
+// ---------------------------------------------------------------------
+
+function patchProjectGradle() {
+  const buildGradle = path.join(ANDROID, 'build.gradle');
+  if (!fs.existsSync(buildGradle)) {
+    console.warn('[android-init] no project build.gradle; skip kotlin classpath patch');
+    return;
+  }
+  let g = fs.readFileSync(buildGradle, 'utf8');
+  const MARKER = '// claude-sessions: kotlin gradle classpath';
+  if (g.includes(MARKER) || g.includes('kotlin-gradle-plugin')) return;
+
+  // We want to add the Kotlin gradle plugin to buildscript.dependencies.
+  // Typical Capacitor 7 project build.gradle has:
+  //   buildscript {
+  //     dependencies {
+  //         classpath 'com.android.tools.build:gradle:8.x.x'
+  //     }
+  //   }
+  // We inject our classpath line right after the AGP one.
+  const KOTLIN_VERSION = '1.9.22';
+  if (g.match(/classpath\s+['"]com\.android\.tools\.build:gradle:[^'"]+['"]/)) {
+    g = g.replace(
+      /(classpath\s+['"]com\.android\.tools\.build:gradle:[^'"]+['"])/,
+      (m) => `${m}\n        ${MARKER}\n        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VERSION}"`,
+    );
+  } else if (g.match(/dependencies\s*\{/)) {
+    // No AGP classpath visible — add to first dependencies block instead.
+    g = g.replace(
+      /dependencies\s*\{/,
+      (m) => `${m}\n        ${MARKER}\n        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VERSION}"`,
+    );
+  } else {
+    // Fall back to a buildscript block at the top.
+    g = `buildscript {\n    repositories { google(); mavenCentral() }\n    dependencies {\n        ${MARKER}\n        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VERSION}"\n    }\n}\n\n` + g;
+  }
+  fs.writeFileSync(buildGradle, g);
+  console.log('[android-init] patched project build.gradle (kotlin classpath)');
+}
+
+// ---------------------------------------------------------------------
 // 5. AndroidManifest — service + permissions
 // ---------------------------------------------------------------------
 
@@ -255,6 +338,7 @@ function patchManifest() {
 vendorXterm();
 ensureCapacitorProject();
 copyNativeSources();
+patchProjectGradle();
 patchAppGradle();
 patchManifest();
 
