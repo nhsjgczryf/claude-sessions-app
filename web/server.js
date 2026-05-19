@@ -383,10 +383,35 @@ const heartbeatTimer = setInterval(() => {
 
 wss.on('close', () => clearInterval(heartbeatTimer));
 
+// Global PTY registry — survives individual WS disconnects so a user
+// switching apps, locking the phone, or reloading the page can re-attach
+// and pick up where they left off instead of losing all in-flight work.
+//
+// Each entry is keyed by a persistent id chosen by the client (a UUID
+// stored in localStorage). When the WS that owns a PTY closes we DON'T
+// kill the PTY immediately — instead we null the ws and start a GC
+// timer (default 10 min); if any WS reattaches before that, the timer
+// is cancelled, the new WS becomes the owner, and the buffered output
+// (last ~256KB) is replayed so the client catches up on whatever
+// happened while it was disconnected.
+const ptys = new Map();
+const PTY_GC_MS = 10 * 60 * 1000;
+const PTY_BUFFER_BYTES = 256 * 1024;
+
+function gcPty(persistentId) {
+  const e = ptys.get(persistentId);
+  if (!e) return;
+  if (e.pty) { try { e.pty.kill(); } catch (_) {} }
+  if (e.releaseTunnel) { try { e.releaseTunnel(); } catch (_) {} }
+  ptys.delete(persistentId);
+}
+
 wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.on('pong', heartbeat);
-  const terms = new Map();
+  // Set of persistent IDs currently attached via THIS ws — used on
+  // ws.close to start GC timers for each.
+  const attached = new Set();
 
   // Same env-injection logic as the Electron path (main.js#makeSocksProxyEnv).
   function makeSocksProxyEnv(tunnel) {
@@ -443,6 +468,47 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'create') {
       const { tabId, session, cols, rows } = msg;
+      // Reattach path: a PTY with this id might still be alive on the
+      // server from a previous WS (phone switched apps / page reloaded
+      // / network blip). Cancel its GC timer, take ownership, replay
+      // the buffered output. The client will see {type:'reattached'}
+      // followed by a single big data frame.
+      const existing = ptys.get(tabId);
+      if (existing) {
+        if (existing.killTimer) {
+          clearTimeout(existing.killTimer);
+          existing.killTimer = null;
+        }
+        // If another WS still claims it, detach that one first so
+        // input from one phone doesn't leak to another.
+        existing.ws = ws;
+        attached.add(tabId);
+
+        if (existing.exited) {
+          // PTY died while detached. Surface it to the client so the
+          // "Press R to reconnect" prompt shows up.
+          send(ws, {
+            type: 'reattached',
+            tabId,
+            exited: true,
+            exitCode: existing.lastExitCode,
+          });
+          if (existing.buffer) {
+            send(ws, { type: 'data', tabId, data: existing.buffer });
+          }
+          send(ws, { type: 'exit', tabId, exitCode: existing.lastExitCode });
+        } else {
+          send(ws, { type: 'reattached', tabId });
+          if (existing.buffer) {
+            send(ws, { type: 'data', tabId, data: existing.buffer });
+          }
+          // Push the client's current size to the live PTY.
+          try { existing.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0)); } catch (_) {}
+        }
+        return;
+      }
+
+      // Fresh spawn.
       let term, releaseTunnel;
       try {
         ({ pty: term, releaseTunnel } = await spawnSessionPty(session, cols, rows));
@@ -450,33 +516,45 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
       }
-      // Client may have closed/killed during the tunnel await — bail.
       if (ws.readyState !== ws.OPEN) {
         try { term.kill(); } catch (_) {}
         if (releaseTunnel) { try { releaseTunnel(); } catch (_) {} }
         return;
       }
 
-      const entry = { pty: term, session, releaseTunnel, exited: false };
-      terms.set(tabId, entry);
+      const entry = {
+        tabId,
+        pty: term,
+        session,
+        releaseTunnel,
+        exited: false,
+        lastExitCode: 0,
+        buffer: '',
+        ws,
+        killTimer: null,
+      };
+      ptys.set(tabId, entry);
+      attached.add(tabId);
       attachTermHandlers(tabId, entry);
       sendStartupForSession(term, session);
 
       send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'reconnect') {
-      // Re-spawn a PTY into the same tabId after a previous one exited.
-      // Only the original PTY is gone; the entry (with its session) is
-      // still here, so the new shell uses the same config and — for
-      // persistent SSH — `tmux attach`es back to the same remote session.
-      const { tabId, cols, rows } = msg;
-      const entry = terms.get(tabId);
-      if (!entry || !entry.exited || entry.pty) {
-        send(ws, { type: 'error', tabId, error: 'no exited terminal for this tab' });
+      // Force a fresh PTY into this tabId — used by the "Press R"
+      // prompt after a session exited. Reuses the entry's stored
+      // session config if we still have it, otherwise falls back to
+      // the session passed in the message (covers the case where the
+      // entry was already GC'd after a long absence).
+      const { tabId, session: msgSession, cols, rows } = msg;
+      let entry = ptys.get(tabId);
+      const sessionForSpawn = (entry && entry.session) || msgSession;
+      if (!sessionForSpawn) {
+        send(ws, { type: 'error', tabId, error: 'no session config available for reconnect' });
         return;
       }
       let term, releaseTunnel;
       try {
-        ({ pty: term, releaseTunnel } = await spawnSessionPty(entry.session, cols, rows));
+        ({ pty: term, releaseTunnel } = await spawnSessionPty(sessionForSpawn, cols, rows));
       } catch (err) {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
@@ -486,39 +564,58 @@ wss.on('connection', (ws) => {
         if (releaseTunnel) { try { releaseTunnel(); } catch (_) {} }
         return;
       }
-      entry.pty = term;
-      entry.releaseTunnel = releaseTunnel;
-      entry.exited = false;
+      if (!entry) {
+        entry = {
+          tabId, pty: term, session: sessionForSpawn, releaseTunnel,
+          exited: false, lastExitCode: 0, buffer: '', ws, killTimer: null,
+        };
+        ptys.set(tabId, entry);
+      } else {
+        if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = null; }
+        entry.pty = term;
+        entry.releaseTunnel = releaseTunnel;
+        entry.exited = false;
+        entry.buffer = '';
+        entry.ws = ws;
+      }
+      attached.add(tabId);
       attachTermHandlers(tabId, entry);
       sendStartupForSession(term, entry.session);
       send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'input') {
-      const e = terms.get(msg.tabId);
+      const e = ptys.get(msg.tabId);
       if (e && e.pty) try { e.pty.write(msg.data); } catch (_) {}
     } else if (msg.type === 'resize') {
-      const e = terms.get(msg.tabId);
+      const e = ptys.get(msg.tabId);
       if (e && e.pty) try { e.pty.resize(Math.max(1, msg.cols | 0), Math.max(1, msg.rows | 0)); } catch (_) {}
     } else if (msg.type === 'kill') {
-      const e = terms.get(msg.tabId);
+      // User-initiated teardown: actually destroy the PTY.
+      const e = ptys.get(msg.tabId);
       if (e) {
-        if (e.pty) { try { e.pty.kill(); } catch (_) {} }
-        if (e.releaseTunnel) { try { e.releaseTunnel(); } catch (_) {} }
-        terms.delete(msg.tabId);
+        if (e.killTimer) clearTimeout(e.killTimer);
+        gcPty(msg.tabId);
       }
+      attached.delete(msg.tabId);
     }
   });
 
-  // Helper: wire data + exit handlers for a freshly-spawned PTY. Kept
-  // inline (closes over `ws` and `terms`) so reconnect can reuse it.
+  // Helper: wire data + exit handlers for a freshly-spawned PTY.
+  // Appends every byte to the entry's circular-ish buffer so a future
+  // reattach can replay catch-up output.
   function attachTermHandlers(tabId, entry) {
     const term = entry.pty;
-    term.onData((data) => send(ws, { type: 'data', tabId, data }));
+    term.onData((data) => {
+      entry.buffer = (entry.buffer + data);
+      if (entry.buffer.length > PTY_BUFFER_BYTES) {
+        entry.buffer = entry.buffer.slice(-PTY_BUFFER_BYTES);
+      }
+      if (entry.ws && entry.ws.readyState === entry.ws.OPEN) {
+        send(entry.ws, { type: 'data', tabId, data });
+      }
+    });
     term.onExit(({ exitCode }) => {
-      const cur = terms.get(tabId);
-      // Stale exit (entry was already replaced or removed) — ignore.
+      const cur = ptys.get(tabId);
       if (!cur || cur.pty !== term) return;
-      // Tunnel belongs to this PTY's env; release before the user gets a
-      // chance to hit R, so the reconnect spawns a fresh one.
       if (cur.releaseTunnel) {
         try { cur.releaseTunnel(); } catch (_) {}
         cur.releaseTunnel = null;
@@ -526,7 +623,9 @@ wss.on('connection', (ws) => {
       cur.pty = null;
       cur.exited = true;
       cur.lastExitCode = exitCode;
-      send(ws, { type: 'exit', tabId, exitCode });
+      if (cur.ws && cur.ws.readyState === cur.ws.OPEN) {
+        send(cur.ws, { type: 'exit', tabId, exitCode });
+      }
     });
   }
 
@@ -546,11 +645,18 @@ wss.on('connection', (ws) => {
   }
 
   ws.on('close', () => {
-    for (const e of terms.values()) {
-      if (e && e.pty) { try { e.pty.kill(); } catch (_) {} }
-      if (e && e.releaseTunnel) { try { e.releaseTunnel(); } catch (_) {} }
+    // Detach from PTYs but DO NOT kill them. Start a GC timer for each;
+    // if any client reattaches with the same tabId before the timer
+    // fires, the PTY is preserved and its buffered output is replayed.
+    // Explicit user teardown happens via the 'kill' message instead.
+    for (const tabId of attached) {
+      const e = ptys.get(tabId);
+      if (!e) continue;
+      if (e.ws === ws) e.ws = null;
+      if (e.killTimer) clearTimeout(e.killTimer);
+      e.killTimer = setTimeout(() => gcPty(tabId), PTY_GC_MS);
     }
-    terms.clear();
+    attached.clear();
   });
 });
 

@@ -27,13 +27,43 @@ const THEME = {
 
 const LS_WIDTH = 'claude-sessions.sidebarWidth';
 const LS_COLLAPSED = 'claude-sessions.sidebarCollapsed';
+// Tab list survives page reloads and app-switches. We store minimal
+// metadata (persistent id, owning session id, kind) and recreate tabs
+// on boot — server keeps PTYs alive for a grace period after the WS
+// drops so reattach replays buffered output and resumes input.
+const LS_TABS = 'claude-sessions.tabs';
 
 let ws = null;
 let sessions = [];
 let selectedSessionId = null;
 let tabs = [];
 let activeTabId = null;
-let tabCounter = 0;
+
+function newPersistentId() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 't-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function saveTabsState() {
+  try {
+    const minimal = tabs.map((t) => ({
+      id: t.id,
+      sessionId: t.sessionId,
+      sessionName: t.sessionName,
+      kind: t.kind,
+    }));
+    localStorage.setItem(LS_TABS, JSON.stringify(minimal));
+  } catch (_) {}
+}
+
+function readSavedTabs() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LS_TABS) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
 let editingId = null;
 
 // ============================================================================
@@ -153,7 +183,27 @@ async function bootApp() {
     return;
   }
   renderSessionList();
+  // Recreate any tabs the user had open before reload / app-switch.
+  // Each terminal tab will send 'create' to the server as soon as the
+  // WS is open (via ws.onopen → attachAllTabsToServer) and the server
+  // will reattach to its still-alive PTY if it's within the grace
+  // window, replaying buffered output transparently.
+  restoreTabsFromStorage();
   openWebSocket();
+}
+
+function restoreTabsFromStorage() {
+  const saved = readSavedTabs();
+  if (!saved.length) return;
+  // Cap to avoid pathological growth if something went weird previously.
+  const list = saved.slice(0, 20);
+  for (const t of list) {
+    const session = sessions.find((s) => s.id === t.sessionId);
+    if (!session) continue;
+    const opts = { persistentId: t.id, sessionName: t.sessionName };
+    if (t.kind === 'web') launchWebSession(session, opts);
+    else launchSession(t.sessionId, opts);
+  }
 }
 
 $('#login-form').addEventListener('submit', async (e) => {
@@ -261,7 +311,14 @@ function openWebSocket() {
   // the WebSocket upgrade — nothing to put in the URL.
   const url = `${proto}://${location.host}/`;
   ws = new WebSocket(url);
-  ws.onopen = () => console.log('[ws] open');
+  ws.onopen = () => {
+    console.log('[ws] open');
+    // Re-establish any terminal tabs that aren't already attached.
+    // Server keeps PTYs alive for a grace period, so this either
+    // reattaches (replays buffer) or spawns fresh — both transparent
+    // to the user.
+    attachAllTabsToServer();
+  };
   ws.onclose = (ev) => {
     console.log('[ws] closed', ev.code);
     // 1006/1015 with no session = auth was revoked or expired.
@@ -271,14 +328,12 @@ function openWebSocket() {
         showAuthScreen();
         return;
       }
-      notify('WebSocket disconnected. Reconnecting…', 'error');
-      // Server-side PTYs were killed when the WS dropped, so each terminal
-      // tab needs a fresh `create`. Prompt the user per-tab — for persistent
-      // SSH sessions this re-attaches to the same tmux on the remote.
+      // Server retains PTYs across this disconnect; mark tabs as not
+      // alive locally (so stray keystrokes don't queue up) but DON'T
+      // show the "Press R" prompt — onopen will auto-reattach.
       for (const t of tabs) {
         if (t.kind !== 'terminal' || !t.alive) continue;
         t.alive = false;
-        promptRecreateAfterWsLoss(t);
       }
       renderTabs();
       renderSessionList();
@@ -294,7 +349,21 @@ function openWebSocket() {
     const tab = tabs.find((t) => t.id === msg.tabId);
     if (!tab || tab.kind !== 'terminal') return;
     if (msg.type === 'data') tab.term.write(msg.data);
-    else if (msg.type === 'exit') {
+    else if (msg.type === 'ready') {
+      // Fresh server-side PTY spawned for our tabId.
+      tab.alive = true;
+      renderTabs();
+      renderSessionList();
+    } else if (msg.type === 'reattached') {
+      // Server still had a PTY for our tabId (kept alive across the
+      // brief WS disconnect / page reload). Replay buffer arrives in
+      // a separate 'data' frame; if it was exited a follow-up 'exit'
+      // frame triggers the R-prompt path.
+      tab.alive = !msg.exited;
+      tab.term.write(`\x1b[90m[reattached]\x1b[0m `);
+      renderTabs();
+      renderSessionList();
+    } else if (msg.type === 'exit') {
       tab.alive = false;
       tab.term.write(
         `\r\n\x1b[33m[Session ended with code ${msg.exitCode}. Press R to reconnect, any other key to close.]\x1b[0m\r\n`
@@ -313,7 +382,11 @@ function openWebSocket() {
             renderTabs();
             renderSessionList();
           }, 0);
-          wsSend({ type: 'reconnect', tabId: tab.id, cols, rows });
+          // Include the session config as a fallback: if the server
+          // already GC'd this tab's entry (e.g., we were detached for
+          // > PTY_GC_MS), it can still respawn using msg.session.
+          const session = sessions.find((s) => s.id === tab.sessionId);
+          wsSend({ type: 'reconnect', tabId: tab.id, session, cols, rows });
         } else {
           closeTab(tab.id);
         }
@@ -605,18 +678,21 @@ function deleteSession(sessionId) {
 // Tabs / Terminal
 // ============================================================================
 
-function launchSession(sessionId) {
+// `opts.persistentId` lets the restore-from-localStorage path reuse the
+// same id the server still has a PTY entry for — server will treat the
+// follow-up 'create' as a reattach (replays scrollback buffer) instead
+// of spawning fresh. Defaults to a fresh UUID for ordinary launches.
+function launchSession(sessionId, opts) {
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) return;
-  if (session.type === 'web') return launchWebSession(session);
+  if (session.type === 'web') return launchWebSession(session, opts);
 
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    notify('WebSocket not connected', 'error');
-    return;
-  }
-  const tabId = `tab-${++tabCounter}`;
+  const tabId = (opts && opts.persistentId) || newPersistentId();
+  const restore = !!(opts && opts.persistentId);
   const existing = sessionInstanceCount(sessionId);
-  const displayName = existing === 0 ? session.name : `${session.name} #${existing + 1}`;
+  const displayName =
+    (opts && opts.sessionName) ||
+    (existing === 0 ? session.name : `${session.name} #${existing + 1}`);
 
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -643,7 +719,11 @@ function launchSession(sessionId) {
 
   const tab = {
     id: tabId, sessionId, sessionName: displayName, kind: 'terminal',
-    term, fitAddon, container, alive: true,
+    term, fitAddon, container,
+    // Until the server confirms reattach/spawn we're not alive — keeps
+    // stray onData callbacks (e.g. xterm firing for the initial focus
+    // event) from leaking input.
+    alive: false,
   };
   tabs.push(tab);
 
@@ -658,18 +738,49 @@ function launchSession(sessionId) {
 
   attachKeyboardHandlers(tab);
 
-  const { cols, rows } = term;
-  wsSend({ type: 'create', tabId, session, cols, rows });
+  if (restore) {
+    // A faint placeholder while we wait for the server to either replay
+    // the buffer or spawn fresh. Erased by the first incoming data.
+    term.write(`\x1b[90m[restoring ${escapeHtml(displayName)}…]\x1b[0m\r\n`);
+  }
+
+  saveTabsState();
+  attachToServer(tab, session);
 
   renderTabs();
   switchToTab(tabId);
   renderSessionList();
 }
 
-function launchWebSession(session) {
-  const tabId = `tab-${++tabCounter}`;
+// Send 'create' for a single tab. Server interprets it as reattach if
+// it still has a PTY for that tabId, otherwise spawns fresh.
+function attachToServer(tab, session) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return; // ws.onopen will retry
+  const cols = (tab.term && tab.term.cols) || 120;
+  const rows = (tab.term && tab.term.rows) || 30;
+  wsSend({ type: 'create', tabId: tab.id, session, cols, rows });
+}
+
+// Send 'create' for every terminal tab whose alive flag is false. Used
+// on ws.onopen (initial connect AND reconnect) so the server reattaches
+// to live PTYs or spawns fresh ones, transparently. Web tabs are
+// independent iframes and don't need server state.
+function attachAllTabsToServer() {
+  for (const tab of tabs) {
+    if (tab.kind !== 'terminal') continue;
+    if (tab.alive) continue;
+    const session = sessions.find((s) => s.id === tab.sessionId);
+    if (!session) continue;
+    attachToServer(tab, session);
+  }
+}
+
+function launchWebSession(session, opts) {
+  const tabId = (opts && opts.persistentId) || newPersistentId();
   const existing = sessionInstanceCount(session.id);
-  const displayName = existing === 0 ? session.name : `${session.name} #${existing + 1}`;
+  const displayName =
+    (opts && opts.sessionName) ||
+    (existing === 0 ? session.name : `${session.name} #${existing + 1}`);
 
   const container = document.createElement('div');
   container.className = 'terminal-container web-container';
@@ -710,6 +821,7 @@ function launchWebSession(session) {
   };
   tabs.push(tab);
 
+  saveTabsState();
   renderTabs();
   switchToTab(tabId);
   renderSessionList();
@@ -739,7 +851,11 @@ function closeTab(tabId) {
   if (idx < 0) return;
   const tab = tabs[idx];
   if (tab.kind === 'terminal') {
-    if (tab.alive) wsSend({ type: 'kill', tabId });
+    // Always send kill on explicit close — even if the local tab is in
+    // alive=false state (post-WS-drop), the server-side PTY may still
+    // be sitting in its 10min grace window and should be torn down so
+    // we don't leak processes.
+    wsSend({ type: 'kill', tabId });
     try { tab.term.dispose(); } catch (_) {}
   }
   try { tab.container.remove(); } catch (_) {}
@@ -749,6 +865,7 @@ function closeTab(tabId) {
     activeTabId = next ? next.id : null;
     if (next) switchToTab(next.id);
   }
+  saveTabsState();
   $('#welcome').classList.toggle('hidden', tabs.length > 0);
   renderTabs();
   renderSessionList();
@@ -819,6 +936,7 @@ function attachTabDragHandlers(el, tabId) {
     if (toIdx < 0) toIdx = tabs.length;
     if (!before) toIdx += 1;
     tabs.splice(toIdx, 0, moved);
+    saveTabsState();
     renderTabs();
   });
 }
