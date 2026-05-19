@@ -31,11 +31,14 @@ jobs:
           # are mostly Capacitor-only and change rarely), and missing
           # lockfile makes setup-node error on cache restore.
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
+        # Capacitor 7's capacitor-android library targets Java 21
+        # (sourceCompatibility = VERSION_21). Anything < 21 dies during
+        # compileDebugJavaWithJavac with "invalid source release: 21".
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
