@@ -88,7 +88,15 @@
           <input type="text" name="name" required maxlength="80" />
         </div>
 
-        <div class="field-row">
+        <div class="field">
+          <label>Type</label>
+          <div class="radio-row">
+            <label><input type="radio" name="type" value="ssh" /> SSH (remote)</label>
+            <label><input type="radio" name="type" value="local" /> Local Linux (on this phone)</label>
+          </div>
+        </div>
+
+        <div class="field-row ssh-only">
           <div class="field grow">
             <label>Host</label>
             <input type="text" name="host" required placeholder="vps.example.com" autocomplete="off" autocapitalize="none" spellcheck="false" />
@@ -99,12 +107,12 @@
           </div>
         </div>
 
-        <div class="field">
+        <div class="field ssh-only">
           <label>Username</label>
-          <input type="text" name="username" required placeholder="root" autocomplete="off" autocapitalize="none" spellcheck="false" />
+          <input type="text" name="username" placeholder="root" autocomplete="off" autocapitalize="none" spellcheck="false" />
         </div>
 
-        <div class="field">
+        <div class="field ssh-only">
           <label>Auth</label>
           <div class="radio-row">
             <label><input type="radio" name="authType" value="password" /> Password</label>
@@ -112,7 +120,7 @@
           </div>
         </div>
 
-        <div class="field auth-password">
+        <div class="field ssh-only auth-password">
           <label>Password <span class="dim">(stored on this device in plaintext — sideload only)</span></label>
           <div class="password-wrap">
             <input type="password" name="password" autocomplete="new-password" />
@@ -120,12 +128,12 @@
           </div>
         </div>
 
-        <div class="field auth-key">
+        <div class="field ssh-only auth-key">
           <label>Private key PEM <span class="dim">(OpenSSH or PKCS8; paste contents)</span></label>
           <textarea name="privateKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
         </div>
 
-        <div class="field auth-key">
+        <div class="field ssh-only auth-key">
           <label>Private key passphrase <span class="dim">(if key is encrypted)</span></label>
           <div class="password-wrap">
             <input type="password" name="privateKeyPassphrase" autocomplete="off" />
@@ -133,7 +141,7 @@
           </div>
         </div>
 
-        <div class="field">
+        <div class="field ssh-only">
           <label>Port Forwards <span class="dim">(one per line; <code>14500</code> or <code>local:host:remote</code>)</span></label>
           <textarea name="port_forwards" rows="2" placeholder="14500"></textarea>
         </div>
@@ -141,11 +149,11 @@
         <div class="field">
           <label class="check-row">
             <input type="checkbox" name="persistent" />
-            <span>Persistent (wrap in tmux on the remote — disconnects don't kill the session)</span>
+            <span>Persistent (wrap in tmux — disconnects don't kill the session)</span>
           </label>
         </div>
 
-        <div class="field">
+        <div class="field ssh-only">
           <label>Working Dir <span class="dim">(on the remote)</span></label>
           <input type="text" name="working_dir" placeholder="/home/user/projects" autocomplete="off" autocapitalize="none" spellcheck="false" />
         </div>
@@ -183,6 +191,7 @@
   <div id="context-menu" class="hidden"></div>
 
   <script src="ssh-bridge.js"></script>
+  <script src="local-shell-bridge.js"></script>
   <script src="session-builder.js"></script>
   <script src="renderer.js"></script>
 </body>

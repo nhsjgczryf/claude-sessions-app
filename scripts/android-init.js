@@ -97,7 +97,21 @@ function copyNativeSources() {
     if (!file.endsWith('.kt')) continue;
     copyIfChanged(path.join(NATIVE, file), path.join(dst, file));
   }
+  copyJniSources();
   patchMainActivity(dst);
+}
+
+// JNI C sources for the PTY library (Phase 1 of the local-shell
+// support). Copies android-native/jni/* into
+// android/app/src/main/cpp/ so the CMake build picks them up.
+function copyJniSources() {
+  const srcDir = path.join(NATIVE, 'jni');
+  const dstDir = path.join(ANDROID, 'app', 'src', 'main', 'cpp');
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(dstDir, { recursive: true });
+  for (const file of fs.readdirSync(srcDir)) {
+    copyIfChanged(path.join(srcDir, file), path.join(dstDir, file));
+  }
 }
 
 function patchMainActivity(pkgDir) {
@@ -111,7 +125,7 @@ function patchMainActivity(pkgDir) {
 
   if (fs.existsSync(ktPath)) {
     const current = fs.readFileSync(ktPath, 'utf8');
-    if (current.includes('registerPlugin(SshPlugin::class.java)')) return;
+    if (current.includes('registerPlugin(LocalShellPlugin::class.java)')) return;
     const replacement = `package ${APP_PACKAGE}
 
 import android.os.Bundle
@@ -119,22 +133,22 @@ import com.getcapacitor.BridgeActivity
 
 class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Register the locally-defined SSH plugin BEFORE the bridge
-        // initializes so the WebView sees Capacitor.Plugins.SSH on
-        // first paint.
+        // Register locally-defined Capacitor plugins BEFORE the
+        // bridge initializes so the WebView sees them on first paint.
         registerPlugin(SshPlugin::class.java)
+        registerPlugin(LocalShellPlugin::class.java)
         super.onCreate(savedInstanceState)
     }
 }
 `;
     fs.writeFileSync(ktPath, replacement);
-    console.log('[android-init] patched MainActivity.kt to register SshPlugin');
+    console.log('[android-init] patched MainActivity.kt (SshPlugin + LocalShellPlugin)');
     return;
   }
 
   if (fs.existsSync(javaPath)) {
     const current = fs.readFileSync(javaPath, 'utf8');
-    if (current.includes('registerPlugin(SshPlugin.class)')) return;
+    if (current.includes('registerPlugin(LocalShellPlugin.class)')) return;
     const replacement = `package ${APP_PACKAGE};
 
 import android.os.Bundle;
@@ -143,16 +157,16 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        // Register the locally-defined SSH plugin BEFORE the bridge
-        // initializes so the WebView sees Capacitor.Plugins.SSH on
-        // first paint.
+        // Register locally-defined Capacitor plugins BEFORE the
+        // bridge initializes so the WebView sees them on first paint.
         registerPlugin(SshPlugin.class);
+        registerPlugin(LocalShellPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
 `;
     fs.writeFileSync(javaPath, replacement);
-    console.log('[android-init] patched MainActivity.java to register SshPlugin');
+    console.log('[android-init] patched MainActivity.java (SshPlugin + LocalShellPlugin)');
     return;
   }
 
@@ -219,6 +233,32 @@ function patchAppGradle() {
   // doesn't fail the build.
   if (!g.match(/buildTypes\s*\{[^}]*debug\s*\{[^}]*minifyEnabled\s*false/)) {
     g = g.replace(/buildTypes\s*\{/, (m) => `${m}\n        debug { minifyEnabled false }`);
+  }
+
+  // Native PTY library (jni/pty.c → libclaudesessions_pty.so) for
+  // the LocalShellPlugin. We restrict to arm64-v8a (~99% of modern
+  // Android devices) to keep the APK small and the build matrix
+  // boring; older armv7 / x86_64 would need separate cross compiles.
+  const CMAKE_MARKER = '// claude-sessions: cmake native build';
+  if (!g.includes(CMAKE_MARKER)) {
+    // Insert into defaultConfig: ndk { abiFilters } + externalNativeBuild cmake hint
+    g = g.replace(/defaultConfig\s*\{/, (m) => `${m}
+        ${CMAKE_MARKER}
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { cppFlags '' } }
+`);
+    // Insert into android { ... }: top-level externalNativeBuild that
+    // points at our CMakeLists.txt.
+    g = g.replace(/android\s*\{/, (m) => `${m}
+    ${CMAKE_MARKER}
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+    ndkVersion '26.1.10909125'
+`);
   }
 
   // BouncyCastle (transitive dep of sshj) ships 3 jars — bcprov,

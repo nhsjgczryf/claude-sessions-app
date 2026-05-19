@@ -41,7 +41,13 @@ jobs:
           java-version: '21'
 
       - name: Set up Android SDK
+        # Pre-install NDK + CMake so gradle doesn't have to download
+        # them mid-build (the externalNativeBuild block for the JNI
+        # PTY library needs both). ndk;26.1.10909125 matches the
+        # ndkVersion we patch into app/build.gradle in android-init.js.
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;26.1.10909125 cmake;3.22.1'
 
       - name: Install npm deps
         # node-pty has no Android-arm64 prebuild and would try to compile

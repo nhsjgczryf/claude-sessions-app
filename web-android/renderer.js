@@ -319,7 +319,7 @@ function openEditor(sessionId) {
   form.reset();
   const session = sessionId ? sessions.find((s) => s.id === sessionId) : null;
   const values = session || {
-    name: '', host: '', port: 22, username: 'root',
+    name: '', type: 'ssh', host: '', port: 22, username: 'root',
     authType: 'password', password: '', privateKey: '', privateKeyPassphrase: '',
     port_forwards: '', working_dir: '', pre_command: '',
     claude_cmd: 'claude', claude_args: '', description: '', persistent: false,
@@ -329,15 +329,31 @@ function openEditor(sessionId) {
     if (input) input.value = values[key] != null ? values[key] : '';
   }
   if (form.elements['persistent']) form.elements['persistent'].checked = !!values.persistent;
+  const sessionType = values.type || 'ssh';
+  const typeRadio = form.querySelector(`input[name="type"][value="${sessionType}"]`);
+  if (typeRadio) typeRadio.checked = true;
   const authType = values.authType || 'password';
   const authRadio = form.querySelector(`input[name="authType"][value="${authType}"]`);
   if (authRadio) authRadio.checked = true;
   updateAuthVisibility();
+  updateTypeVisibility();
 
   $('#editor-title').textContent = session ? 'Edit Session' : 'New Session';
   $('#modal-overlay').classList.remove('hidden');
   adaptEditorToViewport();
   setTimeout(() => form.elements['name'].focus(), 50);
+}
+
+function updateTypeVisibility() {
+  const form = $('#editor-form');
+  const checked = form.querySelector('input[name="type"]:checked');
+  const isSsh = !checked || checked.value === 'ssh';
+  document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', !isSsh));
+  // When type=local, auth-* are hidden by ssh-only already; don't
+  // also let updateAuthVisibility re-show them. So short-circuit:
+  if (!isSsh) {
+    document.querySelectorAll('.auth-password, .auth-key').forEach((el) => el.classList.add('hidden'));
+  }
 }
 
 // Whenever a field inside the editor gets focus (typically via tap →
@@ -378,22 +394,24 @@ async function saveEditor(e) {
   const data = new FormData(form);
   const name = (data.get('name') || '').toString().trim();
   if (!name) { notify('Name is required', 'error'); return; }
+  const type = (data.get('type') || 'ssh').toString();
   const host = (data.get('host') || '').toString().trim();
-  if (!host) { notify('Host is required', 'error'); return; }
+  if (type === 'ssh' && !host) { notify('Host is required for SSH sessions', 'error'); return; }
   const username = (data.get('username') || '').toString().trim();
-  if (!username) { notify('Username is required', 'error'); return; }
+  if (type === 'ssh' && !username) { notify('Username is required for SSH sessions', 'error'); return; }
   const authType = (data.get('authType') || 'password').toString();
   const payload = {
     name,
-    host,
+    type,
+    host: type === 'ssh' ? host : '',
     port: parseInt((data.get('port') || '22').toString(), 10) || 22,
-    username,
+    username: type === 'ssh' ? username : '',
     authType,
-    password: authType === 'password' ? (data.get('password') || '').toString() : '',
-    privateKey: authType === 'key' ? (data.get('privateKey') || '').toString() : '',
-    privateKeyPassphrase: authType === 'key' ? (data.get('privateKeyPassphrase') || '').toString() : '',
-    port_forwards: (data.get('port_forwards') || '').toString().trim(),
-    working_dir: (data.get('working_dir') || '').toString().trim(),
+    password: type === 'ssh' && authType === 'password' ? (data.get('password') || '').toString() : '',
+    privateKey: type === 'ssh' && authType === 'key' ? (data.get('privateKey') || '').toString() : '',
+    privateKeyPassphrase: type === 'ssh' && authType === 'key' ? (data.get('privateKeyPassphrase') || '').toString() : '',
+    port_forwards: type === 'ssh' ? (data.get('port_forwards') || '').toString().trim() : '',
+    working_dir: type === 'ssh' ? (data.get('working_dir') || '').toString().trim() : '',
     pre_command: (data.get('pre_command') || '').toString(),
     claude_cmd: (data.get('claude_cmd') || '').toString().trim(),
     claude_args: (data.get('claude_args') || '').toString(),
@@ -438,22 +456,32 @@ async function deleteSession(sessionId) {
 // Tabs / SSH
 // ============================================================================
 
+// Pick the bridge (SSH plugin vs LocalShell plugin) based on the
+// tab's session type. tab.kind is set at launch time and is the
+// authoritative discriminator afterwards (the session config itself
+// might be edited, but the tab keeps using whichever bridge it
+// originally launched with).
+function bridgeFor(tab) {
+  return tab && tab.kind === 'local' ? LocalShellBridge : SshBridge;
+}
+
 async function launchSession(sessionId, opts) {
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) return;
-  if (!session.host) {
+  const sessionType = session.type || 'ssh';
+  if (sessionType === 'ssh' && !session.host) {
     notify('Edit this session to set a host first', 'error');
     openEditor(sessionId);
     return;
   }
-  // Loud, in-your-face diagnostic when the native SSH plugin didn't
-  // register. Without this the connect silently no-ops and the user
-  // is left staring at "[connecting…]" forever. See ssh-bridge.js
-  // for what gates 'available'.
-  if (!SshBridge.available) {
-    notify('Native SSH plugin not loaded — APK build is broken.', 'error');
-    // Continue anyway so they see the placeholder terminal & can
-    // file a bug report with the visible message.
+  // Loud, in-your-face diagnostic when the relevant native plugin
+  // didn't register. Without this the connect silently no-ops and
+  // the user stares at "[connecting…]" forever.
+  const bridgeReady = sessionType === 'local'
+    ? LocalShellBridge.available
+    : SshBridge.available;
+  if (!bridgeReady) {
+    notify(`Native ${sessionType === 'local' ? 'LocalShell' : 'SSH'} plugin not loaded — APK build is broken.`, 'error');
   }
 
   const tabId = (opts && opts.persistentId) || newPersistentId();
@@ -488,6 +516,7 @@ async function launchSession(sessionId, opts) {
 
   const tab = {
     id: tabId, sessionId, sessionName: displayName,
+    kind: sessionType,           // 'ssh' or 'local' — picks the bridge
     term, fitAddon, container, alive: false,
   };
   tabs.push(tab);
@@ -497,20 +526,25 @@ async function launchSession(sessionId, opts) {
   term.onData((data) => {
     if (!tab.alive) return;
     const out = applyCtrlIfArmed(data);
-    SshBridge.write(tabId, out).catch((err) => console.warn('[write]', err));
+    bridgeFor(tab).write(tabId, out).catch((err) => console.warn('[write]', err));
   });
   term.onResize(({ cols, rows }) => {
-    if (tab.alive) SshBridge.resize(tabId, cols, rows).catch(() => {});
+    if (tab.alive) bridgeFor(tab).resize(tabId, cols, rows).catch(() => {});
   });
   attachKeyboardHandlers(tab);
 
-  if (!SshBridge.available) {
+  if (!bridgeReady) {
+    const plug = sessionType === 'local' ? 'LocalShell' : 'SSH';
     term.write(
-      `\r\n\x1b[31m[FATAL] Capacitor SSH plugin not loaded — APK is missing the\r\n` +
+      `\r\n\x1b[31m[FATAL] Capacitor ${plug} plugin not loaded — APK is missing the\r\n` +
       `        native module. Open an issue with the APK version code.\r\n\x1b[0m`,
     );
   }
-  term.write(`\x1b[90m[connecting ${session.username}@${session.host}…]\x1b[0m\r\n`);
+  if (sessionType === 'local') {
+    term.write(`\x1b[90m[starting local shell…]\x1b[0m\r\n`);
+  } else {
+    term.write(`\x1b[90m[connecting ${session.username}@${session.host}…]\x1b[0m\r\n`);
+  }
 
   // tmux name disambiguation: when this is the Nth tab for the same
   // session, suffix the name so additional tabs aren't all mirrored
@@ -538,9 +572,34 @@ async function launchSession(sessionId, opts) {
 async function attemptConnect(tab) {
   const session = sessions.find((s) => s.id === tab.sessionId);
   if (!session) throw new Error('session config missing');
+  const { cols, rows } = tab.term;
+
+  if (tab.kind === 'local') {
+    // Local shell: just spawn /system/bin/sh (Phase 1) or PRoot+
+    // Alpine (Phase 2+) via the LocalShell plugin. No host/auth.
+    // Initial command lets the user pre-set claude_cmd / pre_command
+    // for an "auto-start claude after shell opens" effect.
+    const initParts = [];
+    if (session.pre_command) initParts.push(session.pre_command);
+    if (session.claude_cmd && session.claude_cmd.trim()) {
+      const args = session.claude_args ? ` ${session.claude_args}` : '';
+      initParts.push(`${session.claude_cmd.trim()}${args}`);
+    }
+    const initialCommand = initParts.join('; ');
+    await LocalShellBridge.connect({
+      tabId: tab.id,
+      cols, rows,
+      initialCommand: initialCommand || null,
+    });
+    tab.alive = true;
+    renderTabs();
+    renderSessionList();
+    return;
+  }
+
+  // SSH path (existing).
   const initialCommand = SessionBuilder.buildRemoteCmd(session, { tmuxName: tab.tmuxName });
   const portForwards = SessionBuilder.parsePortForwards(session.port_forwards);
-  const { cols, rows } = tab.term;
   await SshBridge.connect({
     tabId: tab.id,
     host: session.host,
@@ -653,7 +712,7 @@ function switchToTab(tabId) {
     try {
       tab.fitAddon.fit();
       const { cols, rows } = tab.term;
-      if (tab.alive) SshBridge.resize(tabId, cols, rows).catch(() => {});
+      if (tab.alive) bridgeFor(tab).resize(tabId, cols, rows).catch(() => {});
       tab.term.focus();
     } catch (_) {}
   }
@@ -666,7 +725,7 @@ function closeTab(tabId, opts) {
   if (idx < 0) return;
   const tab = tabs[idx];
   if (!(opts && opts.skipSshClose)) {
-    SshBridge.close(tabId).catch(() => {});
+    bridgeFor(tab).close(tabId).catch(() => {});
   }
   try { tab.term.dispose(); } catch (_) {}
   try { tab.container.remove(); } catch (_) {}
@@ -792,20 +851,25 @@ function attachTabDragHandlers(el, tabId) {
 // SSH event hookup
 // ============================================================================
 
-SshBridge.onData((ev) => {
+// Data flows in from EITHER bridge depending on the tab's kind.
+// They never overlap because plugins emit events keyed by tabId
+// which is unique per tab AND the bridges register independent
+// listeners — but to be safe we always dispatch via the tab itself.
+function onAnyData(ev) {
   const tab = tabs.find((t) => t.id === ev.tabId);
   if (tab) tab.term.write(ev.data);
-});
-
-SshBridge.onExit((ev) => {
+}
+function onAnyExit(ev) {
   const tab = tabs.find((t) => t.id === ev.tabId);
   if (!tab) return;
   tab.alive = false;
-  // Persistent sessions auto-retry: SSH on the wire might have died
-  // (wifi switch, NAT timeout, etc.) but the remote tmux is still
-  // there, so reconnecting reattaches transparently.
   const session = sessions.find((s) => s.id === tab.sessionId);
-  if (session && session.persistent && !tab.reconnecting) {
+  // Persistent SSH sessions auto-retry: remote tmux is still alive,
+  // reconnecting reattaches transparently. Local persistent sessions
+  // currently don't have an equivalent (no tmux on the phone yet —
+  // that's Phase 2 in the PRoot+Alpine bundle), so fall through to
+  // manual prompt.
+  if (tab.kind === 'ssh' && session && session.persistent && !tab.reconnecting) {
     tab.term.write(
       `\r\n\x1b[33m[connection lost (exit ${ev.exitCode}) — auto-reconnecting…]\x1b[0m\r\n`,
     );
@@ -820,7 +884,12 @@ SshBridge.onExit((ev) => {
   promptReconnect(tab);
   renderTabs();
   renderSessionList();
-});
+}
+
+SshBridge.onData(onAnyData);
+SshBridge.onExit(onAnyExit);
+LocalShellBridge.onData(onAnyData);
+LocalShellBridge.onExit(onAnyExit);
 
 SshBridge.onWarning((ev) => {
   notify(ev.error || JSON.stringify(ev), 'error');
@@ -904,7 +973,7 @@ function attachKeyboardHandlers(tab) {
 
 function bracketedPaste(tabId, text) {
   if (!text) return;
-  SshBridge.write(tabId, `\x1b[200~${text}\x1b[201~`).catch(() => {});
+  bridgeFor(tab).write(tabId, `\x1b[200~${text}\x1b[201~`).catch(() => {});
 }
 
 // ============================================================================
@@ -968,14 +1037,14 @@ function attachSoftKeyboardFix(tab) {
     const now = Date.now();
     if (now - lastSent < DEDUP_MS) return;
     lastSent = now;
-    SshBridge.write(tab.id, '\x7f').catch(() => {});
+    bridgeFor(tab).write(tab.id, '\x7f').catch(() => {});
   }
   function sendForwardDelete() {
     if (!tab.alive) return;
     const now = Date.now();
     if (now - lastSent < DEDUP_MS) return;
     lastSent = now;
-    SshBridge.write(tab.id, '\x1b[3~').catch(() => {});
+    bridgeFor(tab).write(tab.id, '\x1b[3~').catch(() => {});
   }
 
   // Path 1: hardware / mature keyboards fire keydown for Backspace.
@@ -1085,7 +1154,7 @@ function keybarBytesFor(action) {
     if (bytes == null) return;
     if (action.startsWith('char:')) bytes = applyCtrlIfArmed(bytes);
     else if (ctrlArmed) setCtrlArmed(false);
-    SshBridge.write(tab.id, bytes).catch(() => {});
+    bridgeFor(tab).write(tab.id, bytes).catch(() => {});
     try { tab.term.focus(); } catch (_) {}
   });
 })();
@@ -1106,7 +1175,7 @@ function refitActiveTerminal() {
   try {
     tab.fitAddon.fit();
     const { cols, rows } = tab.term;
-    if (tab.alive) SshBridge.resize(tab.id, cols, rows).catch(() => {});
+    if (tab.alive) bridgeFor(tab).resize(tab.id, cols, rows).catch(() => {});
   } catch (_) {}
 }
 
