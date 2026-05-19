@@ -180,6 +180,33 @@ function patchAppGradle() {
     g = g.replace(/buildTypes\s*\{/, (m) => `${m}\n        debug { minifyEnabled false }`);
   }
 
+  // BouncyCastle (transitive dep of sshj) ships 3 jars — bcprov,
+  // bcutil, bcpkix — each with their own OSGi manifest at the same
+  // path inside META-INF/versions/9/. AGP's resource merger sees the
+  // duplicates and bails. The manifests are OSGi metadata that the
+  // Android runtime never reads, so just exclude them and the usual
+  // license-file siblings that also tend to collide.
+  const PKG_MARKER = '// claude-sessions: packaging excludes';
+  if (!g.includes(PKG_MARKER)) {
+    const inject = `
+    ${PKG_MARKER}
+    packaging {
+        resources {
+            excludes += [
+                'META-INF/versions/9/OSGI-INF/MANIFEST.MF',
+                'META-INF/versions/9/OSGI-INF/**',
+                'META-INF/INDEX.LIST',
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+            ]
+        }
+    }`;
+    g = g.replace(/android\s*\{/, (m) => `${m}\n${inject}`);
+  }
+
   fs.writeFileSync(buildGradle, g);
   console.log('[android-init] patched app/build.gradle');
 }
