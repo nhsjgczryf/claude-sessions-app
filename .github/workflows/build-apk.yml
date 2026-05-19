@@ -60,8 +60,15 @@ jobs:
       - name: Rename APK
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-             dist/claude-sessions-${GITHUB_REF_NAME//\//-}.apk
+          # On main / workflow_dispatch we publish to a rolling 'latest'
+          # release, so the filename should be stable (overwrites prior
+          # asset of the same name). On tag builds it embeds the tag.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            NAME="claude-sessions-${GITHUB_REF_NAME//\//-}.apk"
+          else
+            NAME="claude-sessions-latest.apk"
+          fi
+          cp android/app/build/outputs/apk/debug/app-debug.apk "dist/$NAME"
           ls -lh dist/
 
       - name: Upload APK as workflow artifact
@@ -72,9 +79,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach APK to GitHub Release (tagged builds only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish APK to GitHub Release
+        # Tagged builds → versioned release named after the tag.
+        # main / workflow_dispatch → rolling 'latest' pre-release that
+        # gets overwritten on every successful build. Either way the
+        # APK shows up under https://github.com/<owner>/<repo>/releases
+        # with a stable download URL.
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.apk
-          generate_release_notes: true
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Rolling main build' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/') && 'true' || 'false' }}
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
+          body: ${{ !startsWith(github.ref, 'refs/tags/') && format('Auto-built from main @ `{0}`. Overwritten on every push — for a versioned APK, use a tagged release instead.', github.sha) || '' }}
