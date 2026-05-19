@@ -988,3 +988,44 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   opacity: 0 !important;
   z-index: -5 !important;
 }
+
+/* ============================================================
+ * Mobile composition input bar
+ *
+ * Visible <input> field that sits between the terminal canvas and
+ * the keybar on touch devices. Everything the user types here gets
+ * streamed to the active tab's PTY:
+ *   - each `input` event (ASCII typing, word predictions): forwarded
+ *     as raw text, then the input value is cleared.
+ *   - `compositionend` events (Chinese / Japanese / Korean IME):
+ *     forwarded as the committed text, value cleared.
+ *   - Enter: sends '\r' so shell commands actually execute.
+ *
+ * This bar exists because xterm.js's hidden helper-textarea (used by
+ * the renderer's onData path) is unreliable on Android WebView for
+ * anything that goes through an InputConnection composition — which
+ * is basically all IME input AND Gboard-style predictive typing.
+ * Routing text through a normal visible input sidesteps the entire
+ * bug class. Hardware-keyboard users still get xterm's textarea
+ * path via the existing focus + keydown listeners. */
+#mobile-input-bar {
+  flex-shrink: 0;
+  display: flex;
+  padding: 4px 8px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
+}
+#mobile-input-bar.hidden { display: none; }
+#mobile-input {
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  outline: none;
+}
+#mobile-input:focus { border-color: var(--accent); }

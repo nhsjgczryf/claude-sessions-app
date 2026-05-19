@@ -43,6 +43,21 @@
         <p class="hint">All SSH connections live in this app — no server required.</p>
       </div>
     </div>
+    <!-- Visible composition bar above the keybar. xterm.js's hidden
+         helper-textarea is unreliable for IME (Chinese / Japanese /
+         Korean) and predictive-text input on Android WebView — the
+         InputConnection doesn't deliver compositionend / batched
+         input events to off-screen elements consistently. Routing
+         text through a normal visible <input> sidesteps the whole
+         class of bugs. Single-char typing also goes through this
+         path, so word-level autocomplete (Gboard etc.) works too. -->
+    <div id="mobile-input-bar" class="hidden">
+      <input id="mobile-input" type="text" inputmode="text"
+             autocomplete="off" autocorrect="off"
+             autocapitalize="off" spellcheck="false"
+             enterkeyhint="send"
+             placeholder="Tap to type · Enter sends · 中文/英文都支持" />
+    </div>
     <!-- Only keys the Android soft keyboard either can't reach or
          hides under modifier pages. Punctuation (|, /, ~, etc.) is
          on the keyboard's "123" / symbols page already so it

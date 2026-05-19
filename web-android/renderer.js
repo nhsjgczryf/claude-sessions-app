@@ -1285,11 +1285,101 @@ function updateKeybarVisibility() {
   const tab = tabs.find((t) => t.id === activeTabId);
   const show = isTouchDevice() && !!tab;
   const bar = $('#keybar');
-  if (!bar) return;
-  const wasHidden = bar.classList.contains('hidden');
-  bar.classList.toggle('hidden', !show);
-  if (wasHidden !== !show) setTimeout(refitActiveTerminal, 50);
+  const inputBar = $('#mobile-input-bar');
+  let layoutChanged = false;
+  if (bar) {
+    const wasHidden = bar.classList.contains('hidden');
+    bar.classList.toggle('hidden', !show);
+    if (wasHidden !== !show) layoutChanged = true;
+  }
+  if (inputBar) {
+    const wasHidden = inputBar.classList.contains('hidden');
+    inputBar.classList.toggle('hidden', !show);
+    if (wasHidden !== !show) layoutChanged = true;
+  }
+  if (layoutChanged) setTimeout(refitActiveTerminal, 50);
 }
+
+// ============================================================================
+// Mobile composition input bar
+// ============================================================================
+//
+// Android WebView's InputConnection has been observed to drop ALL
+// composition / batched-input events on xterm.js's hidden helper
+// textarea — even after the CSS workaround that brings it on-screen
+// at non-zero size. The user-visible symptom is: Chinese (Pinyin)
+// commits don't appear, AND English words typed with Gboard's
+// autocomplete don't appear, AND only single-tap-then-pause input
+// makes it through.
+//
+// Routing text through a normal, fully-visible <input> at the bottom
+// of the screen sidesteps the whole class of bugs. compositionend
+// fires reliably on a real input element. We stream each commit
+// (single char OR full IME-composed string) straight to the active
+// tab's PTY and clear the input so the next typing starts fresh.
+//
+// Hardware-keyboard users — Bluetooth keyboards attached to the
+// phone, tablet keyboard cases, etc. — still hit the xterm.js
+// textarea path because they tap the canvas to focus and their
+// keystrokes generate direct keydown events that xterm handles.
+(function attachMobileInput() {
+  const bar = $('#mobile-input-bar');
+  const input = $('#mobile-input');
+  if (!bar || !input) return;
+
+  let composing = false;
+
+  function activeTab() { return tabs.find((t) => t.id === activeTabId); }
+
+  function sendChars(text) {
+    const tab = activeTab();
+    if (!tab || !tab.alive || !text) return;
+    bridgeFor(tab).write(tab.id, text).catch((err) => console.warn('[input-bar]', err));
+  }
+
+  input.addEventListener('compositionstart', () => { composing = true; });
+  input.addEventListener('compositionend', (e) => {
+    composing = false;
+    const text = e.data || '';
+    if (text) sendChars(text);
+    // Clear AFTER the browser finishes its own compositionend
+    // bookkeeping; clearing synchronously trips some IMEs into a
+    // weird state where the next compositionstart never fires.
+    setTimeout(() => { input.value = ''; }, 0);
+  });
+
+  input.addEventListener('input', (e) => {
+    // Skip mid-composition — the compositionend handler will deliver
+    // the final committed text. Skip insertCompositionText specifically
+    // because some IMEs fire input with that inputType during
+    // composition even when compositionstart was already dispatched.
+    if (composing) return;
+    if (e.inputType === 'insertCompositionText') return;
+    const val = input.value;
+    if (!val) return;
+    sendChars(val);
+    input.value = '';
+  });
+
+  // Keys that aren't text: Enter / Backspace / Tab go straight to the
+  // PTY as control bytes. Arrows / Esc / Ctrl-* still use the keybar.
+  input.addEventListener('keydown', (e) => {
+    if (composing) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChars('\r');
+    } else if (e.key === 'Backspace' && !input.value) {
+      // Only forward Backspace when the input is empty — otherwise
+      // we'd let it delete a char locally AND send a backspace to
+      // the PTY, doubling the delete.
+      e.preventDefault();
+      sendChars('\x7f');
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      sendChars('\t');
+    }
+  });
+})();
 
 function refitActiveTerminal() {
   const tab = tabs.find((t) => t.id === activeTabId);
