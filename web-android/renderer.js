@@ -78,10 +78,13 @@ function sessionInstanceCount(sessionId) {
 async function loadSessions() {
   const arr = (await Store.get(KEY_SESSIONS)) || [];
   sessions = Array.isArray(arr) ? arr : [];
-  // First-run seed. The APK now bundles its own Alpine Linux + proot
-  // + claude-code, so the default tap-to-launch session uses the
-  // built-in local shell rather than reaching out for Termux or a VPS.
-  // Either alternative remains one Edit away.
+  // First-run seed. The APK bundles its own Alpine Linux + proot
+  // (~50 MB; extracted to filesDir on first launch), giving the user
+  // a local shell with node/npm/tmux/git ready to go. claude-code is
+  // NOT pre-installed — in restricted-network regions the user needs
+  // to set HTTPS_PROXY before installing anyway, and we don't ship
+  // a pre-installed binary that won't work until they do. The
+  // welcome banner inside the shell tells them how.
   if (!sessions.length) {
     sessions = [
       {
@@ -101,26 +104,7 @@ async function loadSessions() {
         pre_command: '',
         claude_cmd: '',
         claude_args: '',
-        description: 'Tap Launch to open an Alpine Linux shell on this phone. First launch extracts the bundled rootfs (~30s).',
-      },
-      {
-        id: newPersistentId(),
-        name: 'Local Linux + claude',
-        type: 'local',
-        host: '',
-        port: 22,
-        username: '',
-        authType: 'password',
-        password: '',
-        privateKey: '',
-        privateKeyPassphrase: '',
-        port_forwards: '',
-        persistent: false,
-        working_dir: '',
-        pre_command: '',
-        claude_cmd: 'claude',
-        claude_args: '',
-        description: 'Same as above, but auto-starts the claude CLI after the shell opens.',
+        description: 'Alpine Linux shell on this phone (node/npm/tmux/git preinstalled). First launch extracts the bundled rootfs (~30s).',
       },
       {
         id: newPersistentId(),
@@ -139,7 +123,7 @@ async function loadSessions() {
         pre_command: '',
         claude_cmd: 'claude',
         claude_args: '',
-        description: 'Edit me with your VPS host / credentials, then Launch.',
+        description: 'Edit me with your VPS host / credentials, then Launch. claude on the remote inside tmux survives disconnects.',
       },
     ];
   }

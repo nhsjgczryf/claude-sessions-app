@@ -25,7 +25,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${OUT:-$ROOT/android/app/src/main/assets}"
 ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
 PROOT_REF="${PROOT_REF:-v5.4.0}"      # latest tagged proot release as of 2026-05
-NPM_INSTALL="${NPM_INSTALL:-@anthropic-ai/claude-code}"
+# Empty by default: we ship the rootfs with nodejs + npm but DON'T
+# pre-install claude-code. Two reasons:
+#   - In restricted-network regions the API isn't reachable without a
+#     proxy anyway, so a pre-installed binary is useless until the
+#     user configures HTTPS_PROXY. They might as well install at the
+#     same time they set the proxy.
+#   - npm-install-on-musl under QEMU is the build's most fragile step;
+#     skipping it knocks ~3-5 min off the CI runtime and removes a
+#     class of build-time failures.
+# Set NPM_INSTALL="..." in the workflow env to pre-install anyway.
+NPM_INSTALL="${NPM_INSTALL:-}"
 
 mkdir -p "$OUT"
 cd "$ROOT"
@@ -147,23 +157,16 @@ RUN npm config set fund false \
  && npm config set audit false \
  && npm config set update-notifier false
 
-# Install claude-code into a known global location and validate.
-# Previously this step was guarded with `|| echo WARN` so install
-# failures were silently swallowed; the resulting rootfs shipped
-# without /usr/local/bin/claude. We now hard-fail the build on
-# install/validation errors so the CI log surfaces the actual npm
-# error instead of a late "claude: not found" on-device.
-#
-# The diagnostic block prints npm's chosen prefix and what binaries
-# actually got created, so the next time something breaks we know
-# whether it's a path issue vs a postinstall vs a package-not-found.
-RUN set -ex \
- && echo "node: $(node -v)  npm: $(npm -v)  prefix: $(npm config get prefix)" \
- && npm install -g $NPM_INSTALL \
- && echo "--- $(npm config get prefix)/bin after install ---" \
- && ls -la "$(npm config get prefix)/bin/" \
- && command -v claude \
- && claude --version
+# Pre-install nothing by default — the rootfs ships node/npm and the
+# user installs whatever they want on first run (typically:
+# `HTTPS_PROXY=... npm i -g @anthropic-ai/claude-code`). Set
+# NPM_INSTALL via build-arg if you want a pre-installed package.
+RUN if [ -n "$NPM_INSTALL" ]; then \
+      set -ex; \
+      echo "node: $(node -v)  npm: $(npm -v)  prefix: $(npm config get prefix)"; \
+      npm install -g $NPM_INSTALL; \
+      ls -la "$(npm config get prefix)/bin/"; \
+    fi
 RUN (npm cache clean --force || true) \
  && (rm -rf /root/.npm || true)
 
@@ -187,9 +190,18 @@ export PS1='\[\e[36m\]alpine\[\e[0m\]:\w# '
 if [ -t 1 ] && [ -z "$CS_WELCOMED" ]; then
   export CS_WELCOMED=1
   echo "Alpine $(cat /etc/alpine-release 2>/dev/null) on Android (claude-sessions)."
-  command -v claude >/dev/null && echo "  claude:  $(claude --version 2>/dev/null || echo installed)"
-  command -v tmux   >/dev/null && echo "  tmux:    available - wrap claude in 'tmux new -s work' for resume-on-reconnect"
   command -v node   >/dev/null && echo "  node:    $(node -v)"
+  command -v tmux   >/dev/null && echo "  tmux:    wrap commands in 'tmux new -s work' for resume-on-reconnect"
+  if command -v claude >/dev/null; then
+    echo "  claude:  $(claude --version 2>/dev/null || echo installed)"
+  else
+    cat <<MSG
+  claude:  not installed. To install:
+             # if your network can't reach the npm registry / Anthropic API directly,
+             # set a proxy first, e.g.:  export HTTPS_PROXY=http://10.0.2.2:7890
+             npm i -g @anthropic-ai/claude-code
+MSG
+  fi
   echo
 fi
 EOF
