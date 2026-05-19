@@ -5,183 +5,179 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#1e1e2e" />
   <title>Claude Sessions</title>
-  <style>
-    :root {
-      --bg: #1e1e2e; --bg2: #252536; --fg: #cdd6f4; --fg-dim: #6c7086;
-      --accent: #89b4fa; --border: #45475a; --input-bg: #313244;
-      --red: #f38ba8;
-    }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; height: 100vh; background: var(--bg); color: var(--fg);
-      font-family: 'Segoe UI', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
-    .center { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
-    .card { width: min(420px, 100%); background: var(--bg2); border: 1px solid var(--border);
-      border-radius: 12px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
-    h1 { color: var(--accent); margin: 0 0 4px; font-size: 22px; }
-    .sub { color: var(--fg-dim); font-size: 13px; line-height: 1.5; margin: 0 0 18px; }
-    label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
-      color: var(--fg-dim); margin: 14px 0 4px; }
-    input[type=url] {
-      width: 100%; padding: 12px 14px; font-size: 16px;
-      background: var(--input-bg); color: var(--fg); border: 1px solid var(--border);
-      border-radius: 6px; outline: none; font-family: 'Cascadia Code', monospace;
-    }
-    input[type=url]:focus { border-color: var(--accent); }
-    button { width: 100%; margin-top: 18px; padding: 14px; border: 0; border-radius: 8px;
-      background: var(--accent); color: var(--bg); font-weight: 600; font-size: 15px; cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .error { color: var(--red); font-size: 13px; min-height: 16px; margin-top: 12px; }
-    .hint { font-size: 11px; color: var(--fg-dim); margin-top: 8px; line-height: 1.5; }
-    .splash { text-align: center; font-size: 14px; color: var(--fg-dim); }
-    .icon { width: 72px; height: 72px; display: block; margin: 0 auto 14px; }
-  </style>
+
+  <link rel="stylesheet" href="vendor/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="vendor/xterm/lib/xterm.js"></script>
+  <script src="vendor/xterm/lib/addon-fit.js"></script>
+  <script src="vendor/xterm/lib/addon-web-links.js"></script>
+  <script src="vendor/xterm/lib/addon-unicode11.js"></script>
 </head>
 <body>
-  <div class="center">
-    <div class="card">
-
-      <div id="splash" class="splash">
-        <svg class="icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-          <rect width="512" height="512" rx="96" fill="#1e1e2e"/>
-          <g stroke="#89b4fa" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" fill="none">
-            <polyline points="148,184 232,256 148,328" />
-            <line x1="270" y1="340" x2="380" y2="340" />
-          </g>
-        </svg>
-        <div>Connecting…</div>
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <div class="sidebar-title-row">
+        <div class="sidebar-title">Claude Sessions</div>
+        <button id="btn-collapse" class="icon-btn" title="Collapse sidebar">&#x276E;</button>
       </div>
+      <div class="sidebar-actions">
+        <button id="btn-new" title="New session">+ New</button>
+        <button id="btn-paste-img" title="Pick image from gallery">Img</button>
+      </div>
+    </div>
+    <div id="session-list"></div>
+  </div>
 
-      <form id="setup" style="display:none">
-        <svg class="icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-          <rect width="512" height="512" rx="96" fill="#1e1e2e"/>
-          <g stroke="#89b4fa" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" fill="none">
-            <polyline points="148,184 232,256 148,328" />
-            <line x1="270" y1="340" x2="380" y2="340" />
-          </g>
-        </svg>
+  <div id="sidebar-resizer" title="Drag to resize"></div>
+
+  <button id="btn-expand" class="icon-btn floating hidden" title="Expand sidebar">&#x276F;</button>
+
+  <div id="main">
+    <div id="tab-bar">
+      <div id="tabs"></div>
+    </div>
+    <div id="terminal-area">
+      <div id="welcome">
         <h1>Claude Sessions</h1>
-        <p class="sub">
-          This app is a thin shell around your VPS. Point it at a server running
-          <code>npm run web</code> and your account/sessions live there.
-        </p>
-        <label for="url">VPS / Server URL</label>
-        <input id="url" type="url" placeholder="https://my-vps.example.com" inputmode="url"
-               autocomplete="url" autocapitalize="none" spellcheck="false" required />
-        <button type="submit" id="connect">Connect</button>
-        <div id="err" class="error"></div>
-        <div class="hint">
-          Use <code>https://</code> in production. Plain <code>http://</code> only works on private LAN /
-          VPN. The URL is stored on this device and can be changed by long-pressing the in-app sidebar
-          header.
-        </div>
-      </form>
-
+        <p>Tap a session on the left to connect.</p>
+        <p class="hint">All SSH connections live in this app — no server required.</p>
+      </div>
+    </div>
+    <div id="keybar" class="hidden" aria-hidden="true">
+      <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
+      <button type="button" data-keybar="key:Tab" title="Tab">Tab</button>
+      <button type="button" data-keybar="key:Escape" title="Esc">Esc</button>
+      <button type="button" data-keybar="key:ArrowUp">↑</button>
+      <button type="button" data-keybar="key:ArrowDown">↓</button>
+      <button type="button" data-keybar="key:ArrowLeft">←</button>
+      <button type="button" data-keybar="key:ArrowRight">→</button>
+      <button type="button" data-keybar="key:Home">Hm</button>
+      <button type="button" data-keybar="key:End">End</button>
+      <button type="button" data-keybar="ctrl:c" title="Ctrl+C">^C</button>
+      <button type="button" data-keybar="ctrl:d" title="Ctrl+D">^D</button>
+      <button type="button" data-keybar="ctrl:z" title="Ctrl+Z">^Z</button>
+      <button type="button" data-keybar="ctrl:l" title="Ctrl+L">^L</button>
+      <button type="button" data-keybar="ctrl:r" title="Ctrl+R">^R</button>
+      <button type="button" data-keybar="char:|">|</button>
+      <button type="button" data-keybar="char:/">/</button>
+      <button type="button" data-keybar="char:\">\</button>
+      <button type="button" data-keybar="char:~">~</button>
+      <button type="button" data-keybar="char:-">-</button>
+      <button type="button" data-keybar="char:_">_</button>
+      <button type="button" data-keybar="char:&gt;">&gt;</button>
+      <button type="button" data-keybar="char:&lt;">&lt;</button>
+      <button type="button" data-keybar="char:&amp;">&amp;</button>
+      <button type="button" data-keybar="char:;">;</button>
+      <button type="button" data-keybar="char:'">'</button>
+      <button type="button" data-keybar='char:"'>"</button>
     </div>
   </div>
 
-  <script>
-    // Capacitor injects itself as window.Capacitor when running inside
-    // the APK. When loaded as a plain web page (e.g. testing in a
-    // desktop browser) we fall back to localStorage.
-    const KEY = 'server_url';
+  <!-- Session editor modal — same shape as web/public, but with auth
+       fields baked in (since the APK owns the SSH connection itself
+       and needs real credentials, not just a hostname). -->
+  <div id="modal-overlay" class="hidden">
+    <div id="session-editor">
+      <div class="editor-header">
+        <span id="editor-title">New Session</span>
+        <button id="editor-close" title="Close">&times;</button>
+      </div>
+      <form id="editor-form" autocomplete="off">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required maxlength="80" />
+        </div>
 
-    function inCapacitor() {
-      return !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences);
-    }
+        <div class="field-row">
+          <div class="field grow">
+            <label>Host</label>
+            <input type="text" name="host" required placeholder="vps.example.com" autocomplete="off" autocapitalize="none" spellcheck="false" />
+          </div>
+          <div class="field shrink">
+            <label>Port</label>
+            <input type="number" name="port" min="1" max="65535" placeholder="22" />
+          </div>
+        </div>
 
-    async function getStoredUrl() {
-      try {
-        if (inCapacitor()) {
-          const { value } = await window.Capacitor.Plugins.Preferences.get({ key: KEY });
-          return value || null;
-        }
-        return localStorage.getItem(KEY) || null;
-      } catch (e) { return null; }
-    }
+        <div class="field">
+          <label>Username</label>
+          <input type="text" name="username" required placeholder="root" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
 
-    async function setStoredUrl(value) {
-      try {
-        if (inCapacitor()) {
-          await window.Capacitor.Plugins.Preferences.set({ key: KEY, value });
-        } else {
-          localStorage.setItem(KEY, value);
-        }
-      } catch (e) {}
-    }
+        <div class="field">
+          <label>Auth</label>
+          <div class="radio-row">
+            <label><input type="radio" name="authType" value="password" /> Password</label>
+            <label><input type="radio" name="authType" value="key" /> Private key</label>
+          </div>
+        </div>
 
-    function show(which) {
-      document.getElementById('splash').style.display = which === 'splash' ? 'block' : 'none';
-      document.getElementById('setup').style.display = which === 'setup' ? 'block' : 'none';
-    }
+        <div class="field auth-password">
+          <label>Password <span class="dim">(stored on this device in plaintext — sideload only)</span></label>
+          <input type="password" name="password" autocomplete="new-password" />
+        </div>
 
-    function normalize(u) {
-      u = (u || '').trim();
-      if (!u) return '';
-      if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
-      // Strip trailing slash for predictable concat later
-      return u.replace(/\/+$/, '');
-    }
+        <div class="field auth-key">
+          <label>Private key PEM <span class="dim">(OpenSSH or PKCS8; paste contents)</span></label>
+          <textarea name="privateKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
+        </div>
 
-    async function ping(url) {
-      // 'no-cors' so we don't need the server to send CORS headers just
-      // to be reachable here — we can't read the response either way,
-      // but a resolved promise (vs DNS / connection-refused error) is
-      // enough proof that the URL is alive. False positives on misrouted
-      // hosts are acceptable; the user retries.
-      try {
-        await fetch(url + '/api/auth/status', {
-          method: 'GET',
-          mode: 'no-cors',
-          cache: 'no-store',
-        });
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
+        <div class="field auth-key">
+          <label>Private key passphrase <span class="dim">(if key is encrypted)</span></label>
+          <input type="password" name="privateKeyPassphrase" autocomplete="off" />
+        </div>
 
-    async function go(url) {
-      // Hand the WebView over to the user's VPS. From here on the page
-      // is served by their own server — same UX as the PWA.
-      location.replace(url + '/');
-    }
+        <div class="field">
+          <label>Port Forwards <span class="dim">(one per line; <code>14500</code> or <code>local:host:remote</code>)</span></label>
+          <textarea name="port_forwards" rows="2" placeholder="14500"></textarea>
+        </div>
 
-    async function boot() {
-      const allowReset = new URLSearchParams(location.search).has('reset');
-      const stored = allowReset ? null : await getStoredUrl();
-      if (stored) {
-        show('splash');
-        document.querySelector('#splash div').textContent = 'Connecting to ' + stored + ' …';
-        await go(stored);
-        return;
-      }
-      show('setup');
-      document.getElementById('url').focus();
-    }
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" name="persistent" />
+            <span>Persistent (wrap in tmux on the remote — disconnects don't kill the session)</span>
+          </label>
+        </div>
 
-    document.getElementById('setup').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById('connect');
-      const errEl = document.getElementById('err');
-      errEl.textContent = '';
-      const raw = document.getElementById('url').value;
-      const url = normalize(raw);
-      if (!url) { errEl.textContent = 'Enter a URL'; return; }
+        <div class="field">
+          <label>Working Dir <span class="dim">(on the remote)</span></label>
+          <input type="text" name="working_dir" placeholder="/home/user/projects" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
 
-      btn.disabled = true;
-      btn.textContent = 'Checking…';
-      const ok = await ping(url);
-      btn.disabled = false;
-      btn.textContent = 'Connect';
-      if (!ok) {
-        errEl.textContent = "Couldn't reach " + url + " — check URL & HTTPS / network.";
-        return;
-      }
-      await setStoredUrl(url);
-      await go(url);
-    });
+        <div class="field">
+          <label>Pre-command <span class="dim">(runs before claude_cmd)</span></label>
+          <input type="text" name="pre_command" placeholder="" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
 
-    boot();
-  </script>
+        <div class="field">
+          <label>Claude Cmd <span class="dim">(empty = plain shell)</span></label>
+          <input type="text" name="claude_cmd" placeholder="claude" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label>Claude Args</label>
+          <input type="text" name="claude_args" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
+
+        <div class="field">
+          <label>Description</label>
+          <input type="text" name="description" maxlength="200" autocomplete="off" />
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" id="editor-cancel">Cancel</button>
+          <button type="submit" id="editor-save">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <input id="image-file-input" type="file" accept="image/*" hidden />
+
+  <div id="context-menu" class="hidden"></div>
+
+  <script src="ssh-bridge.js"></script>
+  <script src="session-builder.js"></script>
+  <script src="renderer.js"></script>
 </body>
 </html>

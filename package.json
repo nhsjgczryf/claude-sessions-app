@@ -1,7 +1,7 @@
 {
   "name": "claude-sessions",
-  "version": "1.1.0",
-  "description": "Manage multiple Claude Code terminal sessions (local + SSH) with xterm.js — Electron desktop app, self-hosted web server, and Android APK shell.",
+  "version": "2.0.0",
+  "description": "Manage multiple Claude Code terminal sessions (local + SSH) with xterm.js — Electron desktop, self-hosted web server, and a native Android APK that does its own SSH (via sshj).",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

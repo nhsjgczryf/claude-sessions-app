@@ -164,45 +164,72 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 
 ## Android APK
 
-把这个 app 当作"**手机 ↔ VPS 的稳定通道**"用：服务端跑在你掌控的某台机器上（VPS / 家里 PC / 开发 box，只要能跑 `npm run web` 即可），APK 是一个 WebView 套壳指向那台机器。所有的 PTY / SSH / Claude 真正在 VPS 上跑，手机只负责显示+输入。
+**这个 APK 不是套壳——它自己就是 SSH 客户端**。手机上跑 Capacitor + WebView（bundled xterm.js + 我们的多 tab UI），底层 SSH 由原生 Kotlin plugin 用 [sshj](https://github.com/hierynomus/sshj) 在 JVM 里维护。**不依赖外部 server**——目标 SSH 主机就是 SSH 主机，不需要在任何地方跑 `npm run web`。
 
 ### 获取 APK
 
-1. **从 Releases 下载**：每次打 tag（`git tag v1.2.3 && git push --tags`）GitHub Actions 会自动构建 APK 并附在 Release 里。
-2. **本地编译**（需要 JDK 17 + Android SDK）：
+1. **从 Releases 下载**：push 到 `main` 自动构建 rolling latest；打 tag 创建版本化 release。
+   - Latest URL: `https://github.com/<owner>/<repo>/releases/download/latest/claude-sessions-latest.apk`
+2. **本地编译**（需要 JDK 21 + Android SDK）：
    ```bash
    npm install
-   npm run android:init   # 第一次：生成 android/ 目录
-   npm run android:build  # 编译 debug APK
+   npm run android:build
    # 产物：android/app/build/outputs/apk/debug/app-debug.apk
    ```
 
-### 服务器端准备
+### 用法
 
-VPS 上正常跑：
+1. 装 APK 打开（首次会让你允许"未知来源"）
+2. 编辑 Sessions 列表里的占位 session：填 host、username、password 或 PEM 私钥；勾上 Persistent（远端用 tmux 包 shell）；`claude_cmd: claude` 让 SSH 进去就启动 claude
+3. Launch → 直接 SSH 到目标主机；多 tab 并发，每个连接独立
 
-```bash
-HOST=0.0.0.0 PORT=3000 TRUST_PROXY=1 npm run web
-# 套上 Caddy / nginx 拿 HTTPS（推荐），或在私网 / Tailscale 里跑 http
+会话存在 Capacitor Preferences（应用沙盒，卸载一起删）。**不会跨设备同步**——多设备共享需要手动 export / import（暂未做 UI）。
+
+### 功能对照（vs 桌面/Web 版）
+
+| 功能 | APK |
+|---|---|
+| 多 tab SSH 会话 | ✅ |
+| tmux 持久化 (`persistent`) | ✅（tmux 在远端起，逻辑跟桌面版一致） |
+| Port forwards (`-L`) | ✅（sshj 的 `LocalPortForwarder`） |
+| 图片粘贴到远端 | ✅（系统相册 → SFTP 直接 PUT 到 `/tmp/claude-clipboard/`） |
+| 键盘工具条（Ctrl/Tab/方向键/...） | ✅ |
+| 后台保活 | ✅（foreground service + 持久通知） |
+| 重连提示（Press R） | ✅ |
+| 触屏滚动 scrollback | ✅ |
+| ProxyJump | ❌（计划中） |
+| Web tab (iframe 反代) | ❌（APK 没有反代后端） |
+| 凭证用 Android Keystore 加密 | ❌（当前明文存 Preferences，下个迭代加） |
+
+### 架构图
+
+```
+┌──── Android APK ─────────────────────────────────────────┐
+│                                                           │
+│  WebView (Capacitor)                                      │
+│   ├── xterm.js (bundled)                                  │
+│   ├── renderer.js (sessions + multi-tab UI)               │
+│   └── ssh-bridge.js  ◄── JS-side wrapper                  │
+│         │                                                 │
+│         ▼ Capacitor JS ↔ Native bridge                    │
+│                                                           │
+│  SshPlugin.kt (com.hierynomus.sshj)                       │
+│   ├── connect / write / resize / close                    │
+│   ├── sftpPut（图片上传）                                  │
+│   ├── port forwards (LocalPortForwarder)                  │
+│   └── ForegroundService（持久通知 → 进程保活）              │
+│         │                                                 │
+│         ▼ TCP / SSH                                       │
+└─────────│─────────────────────────────────────────────────┘
+          │
+   任何 SSH 主机（VPS / dev box / 内网机器）
 ```
 
-注册账号、配 SSH 隧道、装 tmux，跟桌面 / Web 版完全一样——只是入口换成了 APK。
+### 安全注意
 
-### 首次启动
-
-装 APK 后打开，会弹一个表单让你填 VPS URL（`https://my-vps.example.com` 或局域网内 `http://192.168.1.5:3000`）。填完点 Connect，URL 会通过 Capacitor Preferences 存到 Android 应用沙盒里，后续启动自动跳过这一步直接连。
-
-想改 URL：进入 app 后用 `?reset=1` 重新打开（暂时只能这样；未来加按钮）。或者清掉应用数据。
-
-### 设计取舍
-
-- **手机本身永远不跑 PTY/SSH**。Termux 的 node-pty 编译坑太多，nodejs-mobile 在 Android 上的兼容性问题更难调。APK 只做 UI shell，关键状态全在 VPS。
-- **PWA 已经覆盖 95% 的功能**（图标、全屏、键盘工具栏、相册粘贴、tab 持久化、tmux 兜底）。APK 比 PWA 多的：
-  - 独立 app 入口，不依赖浏览器
-  - Android 后台保活更顽强（但不绝对，最终还是靠服务端 PTY grace + tmux 兜底）
-  - 没有浏览器地址栏
-  - 沙盒存储（URL 存在 Capacitor Preferences 而不是 cookie）
-- 不需要 Google Play 上架：sideload 即可。系统会警告"未知来源"，照常确认安装。
+- **私钥/密码当前明文存 Capacitor Preferences**（应用沙盒）。root 过的手机的 root 用户能读到。下版本上 Android Keystore。
+- **Host key 当前不验证**（用了 `PromiscuousVerifier`），有中间人攻击风险。下版本加 `known_hosts` 校验。
+- Debug 签名，第一次安装 Android 会唠叨"未知来源"——sideload 装即可。
 
 ## 技术栈
 
