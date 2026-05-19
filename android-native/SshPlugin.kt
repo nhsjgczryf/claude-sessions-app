@@ -99,6 +99,16 @@ class SshPlugin : Plugin() {
                 emitStatus(tabId, "Connecting to $host:$port…")
                 client.connect(host, port)
 
+                // SSH-level keepalive. sshj sends a global-request ping
+                // every 30s; after a few missed responses the connection
+                // throws, which surfaces as our 'exit' event in JS. That
+                // turns "wifi dropped mid-session" from "hangs forever
+                // until TCP RST minutes later" into "exits within ~90s
+                // and the auto-reconnect path kicks in".
+                try {
+                    client.connection.keepAlive.keepAliveInterval = 30
+                } catch (_: Throwable) {}
+
                 emitStatus(tabId, "Authenticating as $username…")
                 // Auth: prefer key if both provided. sshj's auth*
                 // methods throw on failure; we surface a clean

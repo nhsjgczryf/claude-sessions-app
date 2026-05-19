@@ -266,6 +266,26 @@ const SESSION_FIELDS = [
   'claude_cmd', 'claude_args', 'description',
 ];
 
+// Android keyboards shrink visualViewport.height when they appear,
+// but the modal is sized against window.innerHeight by default — so
+// the bottom half of the editor falls behind the keyboard. Watch
+// visualViewport and re-cap the modal's max-height, and on focusin
+// scroll the target field into view inside the form's own scroll
+// container.
+function adaptEditorToViewport() {
+  const overlay = $('#modal-overlay');
+  if (!overlay || overlay.classList.contains('hidden')) return;
+  const editor = $('#session-editor');
+  if (!editor) return;
+  const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  editor.style.maxHeight = Math.max(120, h - 16) + 'px';
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', adaptEditorToViewport);
+  window.visualViewport.addEventListener('scroll', adaptEditorToViewport);
+}
+
 function openEditor(sessionId) {
   editingId = sessionId || null;
   const form = $('#editor-form');
@@ -289,8 +309,28 @@ function openEditor(sessionId) {
 
   $('#editor-title').textContent = session ? 'Edit Session' : 'New Session';
   $('#modal-overlay').classList.remove('hidden');
+  adaptEditorToViewport();
   setTimeout(() => form.elements['name'].focus(), 50);
 }
+
+// Whenever a field inside the editor gets focus (typically via tap →
+// soft keyboard pops up), scroll that field into view inside the
+// form's own scroll container so the user can see what they're
+// typing instead of it being behind the keyboard.
+(function wireEditorFocusScroll() {
+  const form = $('#editor-form');
+  if (!form) return;
+  form.addEventListener('focusin', (e) => {
+    const target = e.target;
+    if (!target || !target.scrollIntoView) return;
+    // Wait for the keyboard to actually appear and visualViewport
+    // to settle before measuring; 280ms covers most Android IMEs.
+    setTimeout(() => {
+      try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+      catch (_) {}
+    }, 280);
+  });
+})();
 
 function closeEditor() {
   $('#modal-overlay').classList.add('hidden');
@@ -432,44 +472,112 @@ async function launchSession(sessionId, opts) {
 
   // tmux name disambiguation: when this is the Nth tab for the same
   // session, suffix the name so additional tabs aren't all mirrored
-  // onto a single tmux.
-  const tmuxName = existing === 0
+  // onto a single tmux. Stored on the tab so reconnects target the
+  // exact same tmux session and pick up where they left off.
+  tab.tmuxName = existing === 0
     ? `cs-${SessionBuilder.sanitizeTmuxName(session.id) || 'session'}`
     : `cs-${SessionBuilder.sanitizeTmuxName(session.id) || 'session'}-${existing + 1}`;
-
-  const initialCommand = SessionBuilder.buildRemoteCmd(session, { tmuxName });
-  const portForwards = SessionBuilder.parsePortForwards(session.port_forwards);
-  const { cols, rows } = term;
 
   saveTabsState();
   renderTabs();
   switchToTab(tabId);
   renderSessionList();
 
-  try {
-    await SshBridge.connect({
-      tabId,
-      host: session.host,
-      port: session.port || 22,
-      username: session.username,
-      password: session.authType === 'password' ? session.password : '',
-      privateKey: session.authType === 'key' ? session.privateKey : '',
-      privateKeyPassphrase: session.authType === 'key' ? session.privateKeyPassphrase : '',
-      cols, rows,
-      initialCommand,
-      portForwards,
-    });
-    tab.alive = true;
-    renderTabs();
-    renderSessionList();
-  } catch (err) {
-    term.write(`\r\n\x1b[31m[connect failed: ${err && err.message || err}]\x1b[0m\r\n`);
-    tab.alive = false;
-    renderTabs();
-    renderSessionList();
-    promptReconnect(tab);
-  }
+  // initialAttempt=true so connect failure on the very first try
+  // also feeds into the persistent-session retry path (so "wifi
+  // just came up" is forgiving). For non-persistent sessions, the
+  // catch falls through to the manual "Press R" prompt.
+  await connectOrRetry(tab, /*isInitial*/ true);
 }
+
+// Single connect attempt against the session config. Reads everything
+// off the tab so the same function can be reused by initial launch,
+// auto-reconnect, and the R-keypress fallback.
+async function attemptConnect(tab) {
+  const session = sessions.find((s) => s.id === tab.sessionId);
+  if (!session) throw new Error('session config missing');
+  const initialCommand = SessionBuilder.buildRemoteCmd(session, { tmuxName: tab.tmuxName });
+  const portForwards = SessionBuilder.parsePortForwards(session.port_forwards);
+  const { cols, rows } = tab.term;
+  await SshBridge.connect({
+    tabId: tab.id,
+    host: session.host,
+    port: session.port || 22,
+    username: session.username,
+    password: session.authType === 'password' ? session.password : '',
+    privateKey: session.authType === 'key' ? session.privateKey : '',
+    privateKeyPassphrase: session.authType === 'key' ? session.privateKeyPassphrase : '',
+    cols, rows,
+    initialCommand,
+    portForwards,
+  });
+  tab.alive = true;
+  renderTabs();
+  renderSessionList();
+}
+
+// Persistent sessions automatically retry on connect failure or
+// mid-session disconnect. We use bounded exponential backoff so a
+// permanent error (auth wrong, host down) eventually gives up and
+// hands off to the manual Press-R prompt.
+const RECONNECT_DELAYS_MS = [2000, 5000, 10000, 20000, 30000];
+
+async function connectOrRetry(tab, isInitial) {
+  const session = sessions.find((s) => s.id === tab.sessionId);
+  const persistent = !!(session && session.persistent);
+  tab.reconnecting = true;
+
+  try {
+    await attemptConnect(tab);
+    tab.reconnecting = false;
+    if (!isInitial) tab.term.write(`\x1b[32m[reconnected]\x1b[0m\r\n`);
+    return;
+  } catch (err) {
+    if (!persistent) {
+      tab.term.write(`\r\n\x1b[31m[connect failed: ${err && err.message || err}]\x1b[0m\r\n`);
+      tab.alive = false;
+      tab.reconnecting = false;
+      renderTabs();
+      renderSessionList();
+      promptReconnect(tab);
+      return;
+    }
+    tab.term.write(`\r\n\x1b[33m[connect failed: ${err && err.message || err}]\x1b[0m\r\n`);
+  }
+
+  // Persistent retry loop. Each iteration writes a status line and
+  // sleeps; if the tab is gone (user closed it) or no longer in the
+  // reconnecting state (manual cancel), bail out.
+  for (let i = 0; i < RECONNECT_DELAYS_MS.length; i++) {
+    if (!tabs.includes(tab) || !tab.reconnecting) return;
+    const delay = RECONNECT_DELAYS_MS[i];
+    tab.term.write(
+      `\x1b[33m[retrying in ${delay / 1000}s — attempt ${i + 1}/${RECONNECT_DELAYS_MS.length}]\x1b[0m\r\n`,
+    );
+    await sleep(delay);
+    if (!tabs.includes(tab) || !tab.reconnecting) return;
+    try {
+      await attemptConnect(tab);
+      tab.reconnecting = false;
+      tab.term.write(`\x1b[32m[reconnected]\x1b[0m\r\n`);
+      return;
+    } catch (err) {
+      tab.term.write(`\x1b[31m[retry ${i + 1} failed: ${err && err.message || err}]\x1b[0m\r\n`);
+    }
+  }
+
+  // Exhausted: hand off to manual prompt.
+  tab.reconnecting = false;
+  tab.alive = false;
+  tab.term.write(
+    `\r\n\x1b[33m[auto-reconnect gave up. Press R to retry manually, any other key to close.]\x1b[0m\r\n`,
+  );
+  renderTabs();
+  renderSessionList();
+  promptReconnect(tab);
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function promptReconnect(tab) {
   tab.term.write(
@@ -610,8 +718,21 @@ SshBridge.onExit((ev) => {
   const tab = tabs.find((t) => t.id === ev.tabId);
   if (!tab) return;
   tab.alive = false;
+  // Persistent sessions auto-retry: SSH on the wire might have died
+  // (wifi switch, NAT timeout, etc.) but the remote tmux is still
+  // there, so reconnecting reattaches transparently.
+  const session = sessions.find((s) => s.id === tab.sessionId);
+  if (session && session.persistent && !tab.reconnecting) {
+    tab.term.write(
+      `\r\n\x1b[33m[connection lost (exit ${ev.exitCode}) — auto-reconnecting…]\x1b[0m\r\n`,
+    );
+    renderTabs();
+    renderSessionList();
+    connectOrRetry(tab, /*isInitial*/ false);
+    return;
+  }
   tab.term.write(
-    `\r\n\x1b[33m[Session ended (exit ${ev.exitCode}). Press R to reconnect, any other key to close.]\x1b[0m\r\n`
+    `\r\n\x1b[33m[Session ended (exit ${ev.exitCode}). Press R to reconnect, any other key to close.]\x1b[0m\r\n`,
   );
   promptReconnect(tab);
   renderTabs();
