@@ -21,7 +21,6 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
@@ -103,7 +102,7 @@ class SshPlugin : Plugin() {
                 emitStatus(tabId, "Connecting to $host:$port…")
                 try {
                     client.connect(host, port)
-                } catch (e: Throwable) {
+                } catch (e: Exception) {
                     throw RuntimeException(
                         "TCP connect to $host:$port failed (${e.javaClass.simpleName}: ${e.message ?: "no message"})",
                         e,
@@ -153,22 +152,21 @@ class SshPlugin : Plugin() {
 
                 emitStatus(tabId, "Opening shell…")
                 val session = client.startSession()
-                // sshj's allocatePTY honors term type + initial cols/rows,
-                // so we don't need a follow-up changeWindowDimensions
-                // before startShell. xterm-256color is what xterm.js
-                // declares too.
-                session.allocatePTY(
-                    "xterm-256color", cols, rows, 0, 0, emptyMap<net.schmizz.sshj.connection.channel.PTYMode, Int>(),
-                )
+                // Allocate PTY via reflection so we don't bind to
+                // sshj's PTYMode subpackage (which has shifted between
+                // sshj versions). Empty modes map is fine — no flow
+                // control / signal tweaks needed.
+                Sshj.allocatePty(session, "xterm-256color", cols, rows)
                 val shell = session.startShell()
 
                 val entry = Entry(tabId, client, session, shell, alive = true)
                 sessions[tabId] = entry
                 pending.remove(tabId)
 
-                // Apply initial size — useResize handles it via SSH
-                // window-change.
-                try { session.changeWindowDimensions(cols, rows, 0, 0) } catch (_: Throwable) {}
+                // Apply initial size — sshj's resize method has been
+                // renamed across versions (changeWindowDimensions vs
+                // requestWindowChange). Sshj.resizePty tries both.
+                Sshj.resizePty(session, cols, rows)
 
                 // Reader: shovel shell stdout (which is merged with
                 // stderr by the server when running interactively) to
@@ -211,14 +209,15 @@ class SshPlugin : Plugin() {
                 emitStatus(tabId, "Ready")
                 val ret = JSObject().apply { put("tabId", tabId) }
                 call.resolve(ret)
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 pending.remove(tabId)
                 try { client.disconnect() } catch (_: Throwable) {}
-                // Surface a friendlier message for the common "user
-                // closed mid-handshake" case so JS doesn't pop an
-                // ugly error toast.
-                val msg = e.message ?: "ssh connect failed"
-                call.reject(msg, e)
+                // PluginCall.reject(String, Exception) requires
+                // Exception (not Throwable); we caught Exception to
+                // satisfy that overload. Errors (OOM etc.) bubble up
+                // and crash the plugin thread, which is the right
+                // behavior — we don't want to keep going.
+                call.reject(e.message ?: "ssh connect failed", e)
             }
         }
     }
@@ -236,20 +235,10 @@ class SshPlugin : Plugin() {
         val remotePort = remote.toIntOrNull() ?: return
 
         thread(name = "ssh-fwd-$local") {
-            try {
-                val params = net.schmizz.sshj.connection.channel.direct.LocalPortForwarder.Parameters(
-                    "127.0.0.1", localPort, remoteHost, remotePort,
-                )
-                val ss = java.net.ServerSocket()
-                ss.reuseAddress = true
-                ss.bind(java.net.InetSocketAddress("127.0.0.1", localPort))
-                val forwarder = client.newLocalPortForwarder(params, ss)
-                // listen() blocks until the forwarder is closed (which
-                // happens when the parent SSHClient disconnects).
-                forwarder.listen()
-            } catch (e: Throwable) {
+            val ok = Sshj.startLocalPortForward(client, localPort, remoteHost, remotePort)
+            if (!ok) {
                 val ev = JSObject().apply {
-                    put("error", "port forward $spec failed: ${e.message}")
+                    put("error", "port forward $spec failed (sshj API not found at runtime)")
                 }
                 notifyListeners("warning", ev)
             }
@@ -259,7 +248,7 @@ class SshPlugin : Plugin() {
     private fun emitExit(tabId: String, entry: Entry) {
         if (!entry.alive) return  // already emitted
         entry.alive = false
-        val exitCode = try { entry.session.exitStatus ?: 0 } catch (_: Throwable) { 0 }
+        val exitCode = Sshj.getExitStatus(entry.session) ?: 0
         try { entry.shell.close() } catch (_: Throwable) {}
         try { entry.session.close() } catch (_: Throwable) {}
         try { entry.client.disconnect() } catch (_: Throwable) {}
@@ -284,7 +273,7 @@ class SshPlugin : Plugin() {
             out.write(data.toByteArray(StandardCharsets.UTF_8))
             out.flush()
             call.resolve()
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             call.reject(e.message ?: "write failed", e)
         }
     }
@@ -296,9 +285,9 @@ class SshPlugin : Plugin() {
         val rows = call.getInt("rows", 30)!!
         val entry = sessions[tabId] ?: return call.reject("no session for tabId")
         try {
-            entry.session.changeWindowDimensions(cols, rows, 0, 0)
+            Sshj.resizePty(entry.session, cols, rows)
             call.resolve()
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             call.reject(e.message ?: "resize failed", e)
         }
     }
@@ -353,7 +342,7 @@ class SshPlugin : Plugin() {
                 } finally {
                     tmp.delete()
                 }
-            } catch (e: Throwable) {
+            } catch (e: Exception) {
                 call.reject(e.message ?: "sftp put failed", e)
             }
         }
