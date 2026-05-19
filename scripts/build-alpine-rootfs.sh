@@ -78,12 +78,16 @@ RUN ( git clone --depth 1 --branch "${PROOT_REF}" \
  || ( rm -rf /proot && \
       git clone --depth 1 https://github.com/proot-me/proot.git /proot )
 WORKDIR /proot/src
-# Static link. -no-pie because some musl static toolchains can't
-# produce position-independent static executables. talloc-static
-# provides the .a archives we need; libarchive-static is needed by
-# newer proot versions that use it for `--rootfs`.
-RUN make -j"$(nproc)" proot LDFLAGS="-static -no-pie" \
- || make -j"$(nproc)" proot LDFLAGS="-static"
+# Force static link without wiping proot's own LDFLAGS (which carry
+# -ltalloc + -larchive). Plain `make LDFLAGS=-static` clobbers those
+# and the link dies with "undefined reference to _talloc_zero".
+# Appending an `override` directive to the Makefile keeps the proot
+# library list AND forces -static -no-pie onto the link line.
+RUN echo "override LDFLAGS += -static -no-pie" >> GNUmakefile
+RUN make -j"$(nproc)" proot \
+ || ( echo "Static link with -no-pie failed; retrying without -no-pie" \
+      && sed -i 's| -no-pie||g' GNUmakefile \
+      && make -j"$(nproc)" proot )
 RUN file proot && strip proot && ls -lh proot
 
 FROM scratch
