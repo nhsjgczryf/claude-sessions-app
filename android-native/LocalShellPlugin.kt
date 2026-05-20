@@ -118,6 +118,10 @@ class LocalShellPlugin : Plugin() {
 
                 val entry = Entry(tabId, pid = result[1], masterFd = result[0])
                 sessions[tabId] = entry
+                // Keep the process + wake lock alive in the background
+                // so the shell (and anything running in it — tmux,
+                // node, etc.) survives the user switching apps.
+                try { KeepAlive.acquire(context) } catch (_: Throwable) {}
                 startReader(entry)
 
                 if (!initialCommand.isNullOrBlank()) {
@@ -230,6 +234,8 @@ class LocalShellPlugin : Plugin() {
             entry.alive = false
             sessions.remove(entry.tabId)
             try { Pty.closeFd(entry.masterFd) } catch (_: Throwable) {}
+            try { KeepAlive.release(context) } catch (_: Throwable) {}
+            InputRouter.clearIfOwnedBy("local")
             val ev = JSObject().apply {
                 put("tabId", entry.tabId)
                 put("exitCode", exitCode)

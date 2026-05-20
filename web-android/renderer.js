@@ -1471,62 +1471,71 @@ function updateKeybarVisibility() {
   if (!bar || !input) return;
 
   function activeTab() { return tabs.find((t) => t.id === activeTabId); }
-  function sendChars(text) {
+  function send(text) {
     const tab = activeTab();
     if (!tab || !tab.alive || !text) return;
-    console.log('[mobile-input] send', JSON.stringify(text));
     bridgeFor(tab).write(tab.id, text).catch((err) => console.warn('[mobile-input]', err));
   }
 
-  // Flush whatever's currently staged in the input box to the PTY and
-  // clear it. Called from BOTH the input-event path (real-time
-  // streaming as the user types) AND the compositionend path (IME
-  // commit). Clearing after each flush dedupes the two — whichever
-  // fires second sees an empty box and sends nothing.
-  function flush() {
+  // Mirror model: the box reflects the shell's current (uncommitted)
+  // input line. `sent` is the substring we've already forwarded. On
+  // each *settled* change we diff box-value against `sent` and emit
+  // the minimal delta — backspaces to erase the diverged tail, then
+  // the newly typed text. This is what makes editing feel natural:
+  //
+  //   - type "ls"     → send "l","s"      (box "ls", sent "ls")
+  //   - backspace     → box "l", diff → send \x7f   (sent "l")
+  //   - type Chinese  → composition settles → diff → send "你好"
+  //
+  // The previous "flush whole box on compositionend / input" model
+  // is what made backspace feel like Enter: ending a composition (or
+  // any settle) dumped the entire buffer to the shell at once. The
+  // mirror only ever sends the difference, so backspace just erases
+  // one char on both sides.
+  let sent = '';
+  function syncMirror() {
     const val = input.value;
-    if (!val) return;
-    sendChars(val);
-    input.value = '';
+    let i = 0;
+    const n = Math.min(sent.length, val.length);
+    while (i < n && sent[i] === val[i]) i++;
+    const del = sent.length - i;
+    if (del > 0) send('\x7f'.repeat(del));
+    const add = val.slice(i);
+    if (add) send(add);
+    sent = val;
   }
+  function resetMirror() { input.value = ''; sent = ''; }
 
-  // The previous version skipped inputType === 'insertCompositionText'
-  // expecting compositionend to deliver the committed text. On this
-  // WebView compositionend is unreliable, so the Chinese characters
-  // stayed stuck in the box. The robust signal is the standard
-  // event.isComposing flag: true while the IME candidate window is
-  // open, false the moment text is committed (whether by tapping a
-  // candidate or typing plain ASCII). We flush only when NOT
-  // composing, so intermediate Pinyin keystrokes never leak through.
   input.addEventListener('input', (e) => {
-    if (e.isComposing) return;
-    flush();
+    if (e.isComposing) return;          // wait for the IME to settle
+    syncMirror();
   });
+  // Some IMEs commit without a trailing non-composing input event;
+  // sync on compositionend too (deferred so input.value is updated).
+  input.addEventListener('compositionend', () => setTimeout(syncMirror, 0));
 
-  // Belt-and-suspenders: some IMEs fire compositionend but no
-  // trailing input event. Flush here too (flush() is idempotent
-  // thanks to the clear-after-send).
-  input.addEventListener('compositionend', () => {
-    // Defer one tick so the committed text has definitely landed in
-    // input.value before we read it.
-    setTimeout(flush, 0);
-  });
-
-  // Special keys. Enter flushes any staged text FIRST (covers the
-  // case where neither input nor compositionend delivered it) then
-  // sends the carriage return so the shell executes the command.
   input.addEventListener('keydown', (e) => {
-    if (e.isComposing) return;   // Enter mid-composition = commit candidate
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      flush();
-      sendChars('\r');
-    } else if (e.key === 'Backspace' && !input.value) {
-      e.preventDefault();
-      sendChars('\x7f');
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      sendChars('\t');
+    if (e.isComposing) return;          // Enter mid-composition = commit candidate
+    switch (e.key) {
+      case 'Enter':
+        e.preventDefault();
+        syncMirror();                   // ensure box content reached the shell
+        send('\r');
+        resetMirror();                  // shell consumed the line
+        break;
+      case 'Tab':
+        e.preventDefault();
+        syncMirror();
+        send('\t');
+        resetMirror();                  // shell may rewrite the line (completion)
+        break;
+      case 'Backspace':
+        // Non-empty box: let the input element delete locally; the
+        // input event's syncMirror() emits the matching \x7f. Empty
+        // box: send a raw \x7f so the user can still erase shell-side
+        // content (e.g. after a tab-completion reset).
+        if (!input.value) { e.preventDefault(); send('\x7f'); }
+        break;
     }
   });
 })();

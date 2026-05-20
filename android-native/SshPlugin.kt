@@ -10,7 +10,6 @@
  */
 package app.claudesessions.android
 
-import android.content.Intent
 import android.util.Base64
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -227,9 +226,9 @@ class SshPlugin : Plugin() {
                     } catch (_: Throwable) {}
                 }
 
-                // Keep the process alive in the background while at
-                // least one SSH session is open.
-                ensureForegroundService()
+                // Keep the process (and its wake lock) alive in the
+                // background while this session is open.
+                KeepAlive.acquire(context)
 
                 emitStatus(tabId, "Ready")
                 val ret = JSObject().apply { put("tabId", tabId) }
@@ -283,7 +282,10 @@ class SshPlugin : Plugin() {
             put("exitCode", exitCode)
         }
         notifyListeners("exit", ev)
-        if (sessions.isEmpty()) stopForegroundService()
+        // This session no longer needs the process kept alive.
+        try { KeepAlive.release(context) } catch (_: Throwable) {}
+        // Also drop native input routing if it pointed here.
+        InputRouter.clearIfOwnedBy("ssh")
     }
 
     // ------------------------------------------------------------ write / resize / close
@@ -414,20 +416,4 @@ class SshPlugin : Plugin() {
         call.resolve(JSObject().apply { put("tabIds", arr) })
     }
 
-    // ------------------------------------------------------------ foreground service
-
-    private fun ensureForegroundService() {
-        val ctx = context
-        val intent = Intent(ctx, ForegroundService::class.java)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            ctx.startForegroundService(intent)
-        } else {
-            ctx.startService(intent)
-        }
-    }
-
-    private fun stopForegroundService() {
-        val ctx = context
-        ctx.stopService(Intent(ctx, ForegroundService::class.java))
-    }
 }

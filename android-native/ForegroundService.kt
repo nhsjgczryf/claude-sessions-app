@@ -16,9 +16,12 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class ForegroundService : Service() {
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -35,7 +38,7 @@ class ForegroundService : Service() {
 
         val n: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Claude Sessions")
-            .setContentText("Keeping SSH sessions alive")
+            .setContentText("Keeping terminal sessions alive")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentIntent(pi)
             .setOngoing(true)
@@ -43,11 +46,44 @@ class ForegroundService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
 
-        startForeground(NOTIF_ID, n)
+        try {
+            startForeground(NOTIF_ID, n)
+        } catch (t: Throwable) {
+            android.util.Log.e("ClaudeFGS", "startForeground failed: ${t.message}", t)
+        }
+
+        // A partial wake lock keeps the CPU running while the screen is
+        // off / the app is backgrounded. Without it Android freezes our
+        // process after a few seconds, sshj's keepalive thread stops
+        // ticking, and the SSH server (or an intermediate NAT) drops
+        // the idle connection — exactly the "switch away and the
+        // session is dead" symptom. The notification + foreground
+        // service alone don't guarantee CPU time; the wake lock does.
+        if (wakeLock == null) {
+            try {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "claude-sessions:keepalive",
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire(12 * 60 * 60 * 1000L /* 12h safety cap */)
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("ClaudeFGS", "wakelock acquire failed: ${t.message}", t)
+            }
+        }
+
         // START_STICKY: if Android kills us under heavy pressure,
         // come back when memory frees up so we re-bind to the WebView
         // process if it's still around.
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
+        wakeLock = null
+        super.onDestroy()
     }
 
     private fun ensureChannel() {
