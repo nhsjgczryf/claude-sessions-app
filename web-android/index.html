@@ -55,29 +55,34 @@
          all text typed here streams through to the active tab's
          PTY. Hardware keyboards still go through the xterm path. -->
     <div id="mobile-input-bar" class="hidden">
-      <input id="mobile-input" type="text" inputmode="text"
-             autocomplete="off" autocorrect="off"
-             autocapitalize="off" spellcheck="false"
-             enterkeyhint="send"
-             placeholder="Tap to type · Enter sends · 中文/英文都支持" />
+      <textarea id="mobile-input" rows="1" inputmode="text"
+                autocomplete="off" autocorrect="off"
+                autocapitalize="off" spellcheck="false"
+                enterkeyhint="send"
+                placeholder="Tap to type · Enter sends · Shift+Enter 换行 · 中文/英文"></textarea>
       <button id="mobile-input-send" type="button" title="Send (Enter)">↵</button>
     </div>
     <!-- Only keys the Android soft keyboard either can't reach or
          hides under modifier pages. Punctuation (|, /, ~, etc.) is
          on the keyboard's "123" / symbols page already so it
          doesn't earn its spot here. -->
+    <!-- Keys oriented around claude-code on a phone: Esc (interrupt),
+         Shift+Tab (cycle auto-accept / plan mode), Tab (accept), the
+         arrows (history + menu nav), PgUp/PgDn (scroll output / tmux),
+         ^C (cancel). Ctrl is a one-shot modifier for everything else.
+         Plain punctuation lives on the keyboard's symbols page. -->
     <div id="keybar" class="hidden" aria-hidden="true">
-      <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
-      <button type="button" data-keybar="key:Tab" title="Tab">Tab</button>
-      <button type="button" data-keybar="key:Escape" title="Esc">Esc</button>
-      <button type="button" data-keybar="key:ArrowUp">↑</button>
+      <button type="button" data-keybar="key:Escape" title="Esc (interrupt)">Esc</button>
+      <button type="button" data-keybar="key:ShiftTab" title="Shift+Tab (cycle mode)">⇧⇥</button>
+      <button type="button" data-keybar="key:Tab" title="Tab (accept)">Tab</button>
+      <button type="button" data-keybar="key:ArrowUp" title="Up / history">↑</button>
       <button type="button" data-keybar="key:ArrowDown">↓</button>
       <button type="button" data-keybar="key:ArrowLeft">←</button>
       <button type="button" data-keybar="key:ArrowRight">→</button>
-      <button type="button" data-keybar="key:PageUp" title="Page Up (scroll up in tmux/less)">PgUp</button>
+      <button type="button" data-keybar="key:PageUp" title="Page Up (scroll output)">PgUp</button>
       <button type="button" data-keybar="key:PageDown" title="Page Down">PgDn</button>
-      <button type="button" data-keybar="ctrl:c" title="Ctrl+C">^C</button>
-      <button type="button" data-keybar="ctrl:d" title="Ctrl+D">^D</button>
+      <button type="button" data-keybar="ctrl:c" title="Ctrl+C (cancel)">^C</button>
+      <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
     </div>
   </div>
 

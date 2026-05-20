@@ -633,6 +633,13 @@ async function launchSession(sessionId, opts) {
 async function attemptConnect(tab) {
   const session = sessions.find((s) => s.id === tab.sessionId);
   if (!session) throw new Error('session config missing');
+  // Fit NOW — the keybar + compose bar were just shown by switchToTab,
+  // shrinking the terminal. Without this the first cols/rows we hand
+  // the PTY are the pre-bar (too tall) size, and the 50ms follow-up
+  // refit then resizes again — two sizes back-to-back make a remote
+  // tmux reflow twice and can leave duplicate lines. One correct size
+  // up front avoids that.
+  try { tab.fitAddon.fit(); } catch (_) {}
   const { cols, rows } = tab.term;
 
   if (tab.kind === 'local') {
@@ -1193,12 +1200,14 @@ function attachSoftKeyboardFix(tab) {
   const ta = tab.term && tab.term.textarea;
   if (!ta) return;
 
-  // Hint to the WebView that this textarea wants a standard text
-  // IME. Without this hint, some Android WebView builds skip the
-  // IME's composition wiring for elements they treat as non-text.
+  // inputmode=none: xterm focuses this hidden textarea whenever the
+  // user taps the terminal (for selection / scroll), and on Android
+  // that focus pops up the soft keyboard / IME — covering half the
+  // screen for no reason, since all real typing now goes through the
+  // visible compose box. `none` lets the element keep focus without
+  // summoning the keyboard. Hardware keyboards still deliver keydown.
   try {
-    ta.setAttribute('inputmode', 'text');
-    ta.setAttribute('enterkeyhint', 'send');
+    ta.setAttribute('inputmode', 'none');
   } catch (_) {}
 
   let lastSent = 0;
@@ -1384,6 +1393,7 @@ function keybarBytesFor(action) {
       case 'End': return '\x1b[F';
       case 'PageUp': return '\x1b[5~';
       case 'PageDown': return '\x1b[6~';
+      case 'ShiftTab': return '\x1b[Z';   // CSI Z = back-tab; claude cycles modes
     }
   } else if (kind === 'ctrl' && val && val.length === 1) {
     const c = val.toUpperCase().charCodeAt(0);
@@ -1477,88 +1487,65 @@ function updateKeybarVisibility() {
     bridgeFor(tab).write(tab.id, text).catch((err) => console.warn('[mobile-input]', err));
   }
 
-  // Mirror model: the box reflects the shell's current (uncommitted)
-  // input line. `sent` is the substring we've already forwarded. On
-  // each *settled* change we diff box-value against `sent` and emit
-  // the minimal delta — backspaces to erase the diverged tail, then
-  // the newly typed text. This is what makes editing feel natural:
+  // Compose model (claude-code oriented). Typing is LOCAL — nothing
+  // is sent to the PTY until the user submits. This is the right fit
+  // for claude (you compose a message, then send it) and it sidesteps
+  // every per-keystroke IME headache we fought with the streaming /
+  // mirror approaches: backspace just edits the box, composition only
+  // matters at submit time.
   //
-  //   - type "ls"     → send "l","s"      (box "ls", sent "ls")
-  //   - backspace     → box "l", diff → send \x7f   (sent "l")
-  //   - type Chinese  → composition settles → diff → send "你好"
-  //
-  // The previous "flush whole box on compositionend / input" model
-  // is what made backspace feel like Enter: ending a composition (or
-  // any settle) dumped the entire buffer to the shell at once. The
-  // mirror only ever sends the difference, so backspace just erases
-  // one char on both sides.
-  let sent = '';
-  function syncMirror() {
-    const val = input.value;
-    let i = 0;
-    const n = Math.min(sent.length, val.length);
-    while (i < n && sent[i] === val[i]) i++;
-    const del = sent.length - i;
-    if (del > 0) send('\x7f'.repeat(del));
-    const add = val.slice(i);
-    if (add) send(add);
-    sent = val;
+  // The box is a multi-line auto-growing textarea so a long prompt is
+  // fully visible (wraps) instead of scrolling off a single-line
+  // field — that was the "can't see what I typed" complaint.
+  const MAX_PX = 152;   // ~6 lines; matches the CSS max-height
+  function autoGrow() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, MAX_PX) + 'px';
   }
-  function resetMirror() { input.value = ''; sent = ''; }
+  function clearBox() { input.value = ''; autoGrow(); }
 
-  // Sync the box to the shell, then send a carriage return so the
-  // shell / TUI executes the line. Used by both the Enter key and the
-  // explicit Send button.
+  // Send the composed text, then a carriage return so the shell / TUI
+  // executes it. Multi-line content is wrapped in bracketed paste so
+  // claude / readline insert it atomically as one block rather than
+  // treating each embedded newline as a separate submit.
   function submitLine() {
-    syncMirror();
+    const text = input.value;
+    if (text) {
+      if (text.includes('\n')) {
+        send(`\x1b[200~${text}\x1b[201~`);
+      } else {
+        send(text);
+      }
+    }
     send('\r');
-    resetMirror();
+    clearBox();
   }
 
-  input.addEventListener('input', (e) => {
-    if (e.isComposing) return;          // wait for the IME to settle
-    syncMirror();
-  });
+  input.addEventListener('input', autoGrow);
 
-  // Enter pressed WHILE the IME is composing (e.g. Gboard has "clear"
-  // underlined as a word candidate): the keydown fires with
-  // isComposing=true, the IME swallows the Enter to commit the
-  // candidate, and our handler used to bail — so the shell never got
-  // the carriage return and "/clear" just sat there. We remember the
-  // intent and fire it from compositionend instead.
+  // Enter submits; Shift+Enter inserts a newline (default textarea
+  // behavior — we just let it through and re-grow). Enter pressed
+  // WHILE composing (Gboard has the word underlined as a candidate)
+  // fires keydown with isComposing=true and the IME swallows it to
+  // commit the candidate; we defer the submit to compositionend so
+  // "/clear" + Enter still executes.
   let pendingEnter = false;
   input.addEventListener('compositionend', () => setTimeout(() => {
-    syncMirror();
-    if (pendingEnter) { pendingEnter = false; send('\r'); resetMirror(); }
+    autoGrow();
+    if (pendingEnter) { pendingEnter = false; submitLine(); }
   }, 0));
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (e.isComposing) { pendingEnter = true; return; }
       submitLine();
-      return;
     }
-    if (e.isComposing) return;          // other keys mid-composition: leave to IME
-    switch (e.key) {
-      case 'Tab':
-        e.preventDefault();
-        syncMirror();
-        send('\t');
-        resetMirror();                  // shell may rewrite the line (completion)
-        break;
-      case 'Backspace':
-        // Non-empty box: let the input element delete locally; the
-        // input event's syncMirror() emits the matching \x7f. Empty
-        // box: send a raw \x7f so the user can still erase shell-side
-        // content (e.g. after a tab-completion reset).
-        if (!input.value) { e.preventDefault(); send('\x7f'); }
-        break;
-    }
+    // Shift+Enter and all other keys: default textarea handling
+    // (local edit). Special terminal keys come from the keybar.
   });
 
-  // Explicit Send button — immune to the Enter/composition race
-  // above. Tapping it commits whatever's in the box right now.
+  // Explicit Send button — immune to the Enter/composition race.
   const sendBtn = $('#mobile-input-send');
   if (sendBtn) {
     sendBtn.addEventListener('click', (e) => {
@@ -1580,38 +1567,45 @@ function updateKeybarVisibility() {
 // into a terminal PTY or pass through to the default WebView
 // behavior (regular form input typing).
 //
-// We update the routing state whenever the active tab changes or the
-// session-editor modal opens / closes. When the editor is open, IME
-// input must go to the editor's <input> fields (host, username,
-// etc.), not to the terminal — so we deactivate routing entirely.
-// When the editor closes and a terminal tab is active, we re-arm
-// routing to whichever plugin owns that tab.
+// IMPORTANT: with the visible compose box as the input path, the
+// native InputConnection routing must stay OFF. If it were active and
+// TerminalInputConnection actually got reached on some device, typing
+// into the compose box would be intercepted and force-fed to the PTY
+// instead of accumulating in the box — breaking compose mode. So we
+// always deactivate routing on both plugins. The native WebView /
+// InputRouter machinery stays in the tree (harmless; it just delegates
+// to the default IC), but it never steals compose-box input now.
 function syncNativeInputRoute() {
-  const tab = tabs.find((t) => t.id === activeTabId);
-  const overlay = $('#modal-overlay');
-  const modalOpen = overlay && !overlay.classList.contains('hidden');
-  if (!tab || modalOpen) {
-    // Tear down on both plugins so we can't leave a stale registration
-    // from the kind that's no longer active.
-    if (SshBridge.available) SshBridge.setActiveTab(null).catch(() => {});
-    if (LocalShellBridge.available) LocalShellBridge.setActiveTab(null).catch(() => {});
-    return;
-  }
-  if (tab.kind === 'local') {
-    if (LocalShellBridge.available) LocalShellBridge.setActiveTab(tab.id).catch(() => {});
-    if (SshBridge.available) SshBridge.setActiveTab(null).catch(() => {});
-  } else {
-    if (SshBridge.available) SshBridge.setActiveTab(tab.id).catch(() => {});
-    if (LocalShellBridge.available) LocalShellBridge.setActiveTab(null).catch(() => {});
-  }
+  if (typeof SshBridge !== 'undefined' && SshBridge.available)
+    SshBridge.setActiveTab(null).catch(() => {});
+  if (typeof LocalShellBridge !== 'undefined' && LocalShellBridge.available)
+    LocalShellBridge.setActiveTab(null).catch(() => {});
 }
 
+// Debounced. Keyboard show/hide, layout swaps (keybar/input bar
+// appearing), and sidebar drags can fire many resize events in quick
+// succession. Forwarding every intermediate size to a remote tmux
+// makes it reflow + redraw repeatedly, which is a prime source of the
+// "duplicate lines" artifacts. We coalesce to a single fit + resize
+// once things settle (~90ms), and only send the resize when the
+// dimensions actually changed.
+let _refitTimer = null;
+const _lastSize = new Map();   // tabId -> "colsxrows"
 function refitActiveTerminal() {
+  if (_refitTimer) clearTimeout(_refitTimer);
+  _refitTimer = setTimeout(doRefit, 90);
+}
+function doRefit() {
+  _refitTimer = null;
   const tab = tabs.find((t) => t.id === activeTabId);
   if (!tab) return;
   try {
     tab.fitAddon.fit();
     const { cols, rows } = tab.term;
+    if (!cols || !rows) return;
+    const key = `${cols}x${rows}`;
+    if (_lastSize.get(tab.id) === key) return;   // no real change
+    _lastSize.set(tab.id, key);
     if (tab.alive) bridgeFor(tab).resize(tab.id, cols, rows).catch(() => {});
   } catch (_) {}
 }

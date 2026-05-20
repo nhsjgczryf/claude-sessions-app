@@ -947,6 +947,7 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 #mobile-input-bar {
   flex-shrink: 0;
   display: flex;
+  align-items: flex-end;
   gap: 6px;
   padding: 4px 8px;
   background: var(--bg2);
@@ -954,21 +955,33 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
 }
 #mobile-input-bar.hidden { display: none; }
+/* Multi-line auto-growing compose box. JS sets the height from
+ * scrollHeight on each input event (1 row → up to ~6 rows), so a
+ * long claude prompt is fully visible (wraps) instead of scrolling
+ * off the right edge of a single-line field. */
 #mobile-input {
   flex: 1;
+  min-width: 0;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px 12px;
   font-size: 14px;
+  line-height: 1.35;
   font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
   outline: none;
+  resize: none;
+  overflow-y: auto;
+  max-height: 9.5em;            /* ~6 lines, then scroll inside */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 #mobile-input:focus { border-color: var(--accent); }
 #mobile-input-send {
   flex: 0 0 auto;
   min-width: 48px;
+  align-self: stretch;
   background: var(--accent);
   color: var(--bg);
   border: none;
