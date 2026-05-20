@@ -1506,23 +1506,41 @@ function updateKeybarVisibility() {
   }
   function resetMirror() { input.value = ''; sent = ''; }
 
+  // Sync the box to the shell, then send a carriage return so the
+  // shell / TUI executes the line. Used by both the Enter key and the
+  // explicit Send button.
+  function submitLine() {
+    syncMirror();
+    send('\r');
+    resetMirror();
+  }
+
   input.addEventListener('input', (e) => {
     if (e.isComposing) return;          // wait for the IME to settle
     syncMirror();
   });
-  // Some IMEs commit without a trailing non-composing input event;
-  // sync on compositionend too (deferred so input.value is updated).
-  input.addEventListener('compositionend', () => setTimeout(syncMirror, 0));
+
+  // Enter pressed WHILE the IME is composing (e.g. Gboard has "clear"
+  // underlined as a word candidate): the keydown fires with
+  // isComposing=true, the IME swallows the Enter to commit the
+  // candidate, and our handler used to bail — so the shell never got
+  // the carriage return and "/clear" just sat there. We remember the
+  // intent and fire it from compositionend instead.
+  let pendingEnter = false;
+  input.addEventListener('compositionend', () => setTimeout(() => {
+    syncMirror();
+    if (pendingEnter) { pendingEnter = false; send('\r'); resetMirror(); }
+  }, 0));
 
   input.addEventListener('keydown', (e) => {
-    if (e.isComposing) return;          // Enter mid-composition = commit candidate
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.isComposing) { pendingEnter = true; return; }
+      submitLine();
+      return;
+    }
+    if (e.isComposing) return;          // other keys mid-composition: leave to IME
     switch (e.key) {
-      case 'Enter':
-        e.preventDefault();
-        syncMirror();                   // ensure box content reached the shell
-        send('\r');
-        resetMirror();                  // shell consumed the line
-        break;
       case 'Tab':
         e.preventDefault();
         syncMirror();
@@ -1538,6 +1556,17 @@ function updateKeybarVisibility() {
         break;
     }
   });
+
+  // Explicit Send button — immune to the Enter/composition race
+  // above. Tapping it commits whatever's in the box right now.
+  const sendBtn = $('#mobile-input-send');
+  if (sendBtn) {
+    sendBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      submitLine();
+      try { input.focus(); } catch (_) {}
+    });
+  }
 })();
 
 // ============================================================================
