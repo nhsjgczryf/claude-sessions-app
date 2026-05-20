@@ -104,8 +104,24 @@
         <div class="field">
           <label>Type</label>
           <div class="radio-row">
+            <label><input type="radio" name="type" value="remote" /> Remote agent (web/server.js)</label>
             <label><input type="radio" name="type" value="ssh" /> SSH (remote)</label>
             <label><input type="radio" name="type" value="local" /> Local Linux (on this phone)</label>
+          </div>
+        </div>
+
+        <!-- Remote-agent fields: connect to a web/server.js running on
+             your VPS over WebSocket. The agent owns a tmux-backed PTY,
+             so sessions survive disconnects with no SSH/wake-lock. -->
+        <div class="field remote-only">
+          <label>Agent URL <span class="dim">(wss://host:port — or http(s)/host)</span></label>
+          <input type="text" name="agent_url" placeholder="wss://vps.example.com:3000" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
+        <div class="field remote-only">
+          <label>Agent password <span class="dim">(the web UI account password)</span></label>
+          <div class="password-wrap">
+            <input type="password" name="agent_password" autocomplete="new-password" />
+            <button type="button" class="password-toggle" data-for="agent_password" aria-label="Show password">&#x1F441;</button>
           </div>
         </div>
 
@@ -205,6 +221,7 @@
 
   <script src="ssh-bridge.js"></script>
   <script src="local-shell-bridge.js"></script>
+  <script src="ws-bridge.js"></script>
   <script src="session-builder.js"></script>
   <script src="renderer.js"></script>
 </body>

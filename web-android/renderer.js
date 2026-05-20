@@ -200,14 +200,23 @@ function renderSessionList() {
     // prefer reliable taps over drag.
     card.draggable = !isTouchDevice();
     const count = sessionInstanceCount(s.id);
+    const stype = s.type || 'ssh';
+    const badge = stype === 'local'
+      ? '<span class="badge local">LOCAL</span>'
+      : stype === 'remote'
+        ? '<span class="badge web">AGENT</span>'
+        : '<span class="badge ssh">SSH</span>';
+    const subline = stype === 'remote'
+      ? (s.agent_url ? `<div class="session-desc">${escapeHtml(s.agent_url)}</div>` : '')
+      : (s.host ? `<div class="session-desc">${escapeHtml(s.username || '')}@${escapeHtml(s.host)}${s.port && s.port !== 22 ? ':' + s.port : ''}</div>` : '');
     card.innerHTML = `
       <div class="session-card-top">
         <span class="drag-handle" title="Drag to reorder">&#x2630;</span>
         <span class="session-name">${escapeHtml(s.name)}</span>
-        <span class="badge ssh">SSH</span>
+        ${badge}
         ${count > 0 ? `<span class="badge count">${count}</span>` : ''}
       </div>
-      ${s.host ? `<div class="session-desc">${escapeHtml(s.username || '')}@${escapeHtml(s.host)}${s.port && s.port !== 22 ? ':' + s.port : ''}</div>` : ''}
+      ${subline}
       ${s.description ? `<div class="session-desc">${escapeHtml(s.description)}</div>` : ''}
       <div class="session-actions">
         <button data-action="launch">Launch</button>
@@ -324,6 +333,7 @@ const SESSION_FIELDS = [
   'password', 'privateKey', 'privateKeyPassphrase',
   'port_forwards', 'working_dir', 'pre_command',
   'claude_cmd', 'claude_args', 'description',
+  'agent_url', 'agent_password',
 ];
 
 // Android keyboards shrink visualViewport.height when they appear,
@@ -384,10 +394,13 @@ function openEditor(sessionId) {
 function updateTypeVisibility() {
   const form = $('#editor-form');
   const checked = form.querySelector('input[name="type"]:checked');
-  const isSsh = !checked || checked.value === 'ssh';
+  const type = checked ? checked.value : 'ssh';
+  const isSsh = type === 'ssh';
+  const isRemote = type === 'remote';
   document.querySelectorAll('.ssh-only').forEach((el) => el.classList.toggle('hidden', !isSsh));
-  // When type=local, auth-* are hidden by ssh-only already; don't
-  // also let updateAuthVisibility re-show them. So short-circuit:
+  document.querySelectorAll('.remote-only').forEach((el) => el.classList.toggle('hidden', !isRemote));
+  // When type != ssh, auth-* are hidden by ssh-only already; don't
+  // let updateAuthVisibility re-show them. So short-circuit:
   if (!isSsh) {
     document.querySelectorAll('.auth-password, .auth-key').forEach((el) => el.classList.add('hidden'));
   }
@@ -439,6 +452,8 @@ async function saveEditor(e) {
   if (type === 'ssh' && !host) { notify('Host is required for SSH sessions', 'error'); return; }
   const username = (data.get('username') || '').toString().trim();
   if (type === 'ssh' && !username) { notify('Username is required for SSH sessions', 'error'); return; }
+  const agentUrl = (data.get('agent_url') || '').toString().trim();
+  if (type === 'remote' && !agentUrl) { notify('Agent URL is required for remote sessions', 'error'); return; }
   const authType = (data.get('authType') || 'password').toString();
   const payload = {
     name,
@@ -451,7 +466,10 @@ async function saveEditor(e) {
     privateKey: type === 'ssh' && authType === 'key' ? (data.get('privateKey') || '').toString() : '',
     privateKeyPassphrase: type === 'ssh' && authType === 'key' ? (data.get('privateKeyPassphrase') || '').toString() : '',
     port_forwards: type === 'ssh' ? (data.get('port_forwards') || '').toString().trim() : '',
-    working_dir: type === 'ssh' ? (data.get('working_dir') || '').toString().trim() : '',
+    working_dir: (data.get('working_dir') || '').toString().trim(),
+    // Remote-agent transport fields.
+    agent_url: type === 'remote' ? agentUrl : '',
+    agent_password: type === 'remote' ? (data.get('agent_password') || '').toString() : '',
     pre_command: (data.get('pre_command') || '').toString(),
     claude_cmd: (data.get('claude_cmd') || '').toString().trim(),
     claude_args: (data.get('claude_args') || '').toString(),
@@ -502,7 +520,10 @@ async function deleteSession(sessionId) {
 // might be edited, but the tab keeps using whichever bridge it
 // originally launched with).
 function bridgeFor(tab) {
-  return tab && tab.kind === 'local' ? LocalShellBridge : SshBridge;
+  if (!tab) return SshBridge;
+  if (tab.kind === 'local') return LocalShellBridge;
+  if (tab.kind === 'remote') return WebSocketBridge;
+  return SshBridge;
 }
 
 async function launchSession(sessionId, opts) {
@@ -514,14 +535,21 @@ async function launchSession(sessionId, opts) {
     openEditor(sessionId);
     return;
   }
-  // Loud, in-your-face diagnostic when the relevant native plugin
-  // didn't register. Without this the connect silently no-ops and
-  // the user stares at "[connecting…]" forever.
-  const bridgeReady = sessionType === 'local'
-    ? LocalShellBridge.available
-    : SshBridge.available;
+  if (sessionType === 'remote' && !session.agent_url) {
+    notify('Edit this session to set the agent URL first', 'error');
+    openEditor(sessionId);
+    return;
+  }
+  // Loud, in-your-face diagnostic when the relevant transport isn't
+  // available. Without this the connect silently no-ops and the user
+  // stares at "[connecting…]" forever.
+  const bridgeReady =
+    sessionType === 'local' ? LocalShellBridge.available
+      : sessionType === 'remote' ? WebSocketBridge.available
+        : SshBridge.available;
   if (!bridgeReady) {
-    notify(`Native ${sessionType === 'local' ? 'LocalShell' : 'SSH'} plugin not loaded — APK build is broken.`, 'error');
+    const which = sessionType === 'local' ? 'LocalShell' : sessionType === 'remote' ? 'WebSocket' : 'SSH';
+    notify(`${which} transport not available — APK build is broken.`, 'error');
   }
 
   const tabId = (opts && opts.persistentId) || newPersistentId();
@@ -603,6 +631,8 @@ async function launchSession(sessionId, opts) {
   }
   if (sessionType === 'local') {
     term.write(`\x1b[90m[starting local shell…]\x1b[0m\r\n`);
+  } else if (sessionType === 'remote') {
+    term.write(`\x1b[90m[connecting to agent ${session.agent_url}…]\x1b[0m\r\n`);
   } else {
     term.write(`\x1b[90m[connecting ${session.username}@${session.host}…]\x1b[0m\r\n`);
   }
@@ -663,6 +693,37 @@ async function attemptConnect(tab) {
     // Plugin now has a session entry under this tabId; arm the
     // native input routing if this is still the active tab.
     if (tab.id === activeTabId) syncNativeInputRoute();
+    renderTabs();
+    renderSessionList();
+    return;
+  }
+
+  if (tab.kind === 'remote') {
+    // Remote agent: hand a `local` session config to web/server.js so
+    // claude runs on the VPS, wrapped in a persistent tmux. The agent
+    // owns the PTY; we just stream over WebSocket. persistent:true is
+    // what triggers the server's tmux-attach path (buildLocalCommand).
+    const serverSession = {
+      // Server-side tmux name becomes cs-<id> (buildLocalCommand adds
+      // the cs- prefix). Keying on the persistent tab id means the
+      // same tab always reattaches to the same tmux session, while a
+      // fresh launch gets a fresh one.
+      id: tab.id,
+      type: 'local',
+      persistent: true,
+      pre_command: session.pre_command || '',
+      claude_cmd: session.claude_cmd || '',
+      claude_args: session.claude_args || '',
+      working_dir: session.working_dir || '',
+    };
+    await WebSocketBridge.connect({
+      tabId: tab.id,
+      agentUrl: session.agent_url,
+      password: session.agent_password || '',
+      session: serverSession,
+      cols, rows,
+    });
+    tab.alive = true;
     renderTabs();
     renderSessionList();
     return;
@@ -981,8 +1042,13 @@ SshBridge.onData(onAnyData);
 SshBridge.onExit(onAnyExit);
 LocalShellBridge.onData(onAnyData);
 LocalShellBridge.onExit(onAnyExit);
+WebSocketBridge.onData(onAnyData);
+WebSocketBridge.onExit(onAnyExit);
 
 SshBridge.onWarning((ev) => {
+  notify(ev.error || JSON.stringify(ev), 'error');
+});
+WebSocketBridge.onWarning((ev) => {
   notify(ev.error || JSON.stringify(ev), 'error');
 });
 
@@ -999,6 +1065,7 @@ function onAnyStatus(ev) {
 }
 SshBridge.onStatus(onAnyStatus);
 LocalShellBridge.onStatus(onAnyStatus);
+WebSocketBridge.onStatus(onAnyStatus);
 
 // ============================================================================
 // Keyboard handlers (Ctrl-arm, copy, paste, close)

@@ -58,6 +58,22 @@ if (initialCode) {
 
 const app = express();
 if (TRUST_PROXY) app.set('trust proxy', true);
+
+// CORS for the native APK client. The APK's WebView origin
+// (https://localhost / capacitor://localhost) is cross-origin to this
+// server, so its fetch('/api/auth/login') would be blocked without
+// these headers. We DON'T allow credentials (the APK authenticates
+// with a token it reads from the login response body, not a cookie),
+// so a wildcard origin is safe — and every API route still requires
+// auth regardless. The browser web UI is same-origin and unaffected.
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json({ limit: '15mb' }));
 
 // ---- minimal cookie helpers (no extra dep) ---------------------------
@@ -166,7 +182,11 @@ app.post('/api/auth/login', async (req, res) => {
     const session = await auth.login({ username, password });
     auth.resetRateLimit(ip);
     setSessionCookie(req, res, session.sessionId);
-    res.json({ ok: true, username });
+    // Also return the token in the body. Browsers ignore it (they use
+    // the HttpOnly cookie), but the native APK can't read an HttpOnly
+    // cookie across origins, so it reads the token here and passes it
+    // as ?token= on the WebSocket URL.
+    res.json({ ok: true, username, token: session.sessionId });
   } catch (err) {
     res.status(401).json({ error: 'invalid credentials' });
   }
@@ -187,6 +207,57 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/api/sessions', (_req, res) => res.json(loadSessions()));
+
+// ---- tmux session discovery -----------------------------------------
+//
+// Persistent sessions run inside a `cs-<id>` tmux session on this host
+// (see buildLocalCommand). These endpoints let a client see which ones
+// are currently alive on the server — independent of whether any
+// browser/APK is attached — and kill stale ones. This is the
+// "了解服务端活跃的 claude 会话" feature: the agent (this server) owns
+// the source of truth, the client just queries it.
+const { execFile } = require('child_process');
+
+app.get('/api/tmux/sessions', (_req, res) => {
+  if (process.platform === 'win32') return res.json({ sessions: [], tmux: false });
+  // -F format: name \t created(unix) \t attached(count) \t windows
+  execFile(
+    'tmux',
+    ['list-sessions', '-F', '#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}'],
+    { timeout: 5000 },
+    (err, stdout) => {
+      // err with code 1 + "no server running" just means zero sessions.
+      if (err && !/no server running|no sessions/i.test(String(err.stderr || err.message))) {
+        return res.json({ sessions: [], tmux: true, error: String(err.message) });
+      }
+      const sessions = String(stdout || '')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const [name, created, attached, windows] = line.split('\t');
+          return {
+            name,
+            created: parseInt(created, 10) || 0,
+            attached: parseInt(attached, 10) || 0,
+            windows: parseInt(windows, 10) || 0,
+          };
+        })
+        .filter((s) => s.name && s.name.startsWith('cs-'));
+      res.json({ sessions, tmux: true });
+    },
+  );
+});
+
+app.post('/api/tmux/kill', (req, res) => {
+  const name = String((req.body && req.body.name) || '').replace(/[^A-Za-z0-9_-]/g, '');
+  if (!name || !name.startsWith('cs-')) {
+    return res.status(400).json({ ok: false, error: 'invalid session name' });
+  }
+  execFile('tmux', ['kill-session', '-t', name], { timeout: 5000 }, (err) => {
+    res.json({ ok: !err, error: err ? String(err.message) : undefined });
+  });
+});
 
 app.post('/api/sessions', (req, res) => {
   try {
@@ -327,7 +398,14 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const cookies = parseCookies(req);
-  const session = auth.getSession(cookies.cs_session);
+  // Auth via the HttpOnly cookie (browser) OR a ?token= query param
+  // (native APK client, which can't read the cookie across origins).
+  let token = cookies.cs_session;
+  try {
+    const t = new URL(req.url || '/', 'http://x').searchParams.get('token');
+    if (!token && t) token = t;
+  } catch (_) {}
+  const session = auth.getSession(token);
   if (!session) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
