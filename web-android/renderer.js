@@ -562,6 +562,7 @@ async function launchSession(sessionId, opts) {
   tabs.push(tab);
   attachTouchScroll(tab);
   attachSoftKeyboardFix(tab);
+  attachTerminalLongPress(tab);
 
   term.onData((data) => {
     if (!tab.alive) return;
@@ -1059,7 +1060,84 @@ function attachKeyboardHandlers(tab) {
 
 function bracketedPaste(tabId, text) {
   if (!text) return;
+  const tab = tabs.find((t) => t.id === tabId);
+  if (!tab) return;
   bridgeFor(tab).write(tabId, `\x1b[200~${text}\x1b[201~`).catch(() => {});
+}
+
+// Read the visible viewport (or full selection) as plain text. Touch
+// selection in xterm.js only grabs a single line/word, so for "copy
+// the command output" the reliable path is to grab the whole visible
+// screen. Trailing blank lines are trimmed.
+function readViewportText(term) {
+  try {
+    const buf = term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < term.rows; i++) {
+      const line = buf.getLine(buf.viewportY + i);
+      lines.push(line ? line.translateToString(true) : '');
+    }
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    return lines.join('\n');
+  } catch (_) { return ''; }
+}
+
+// Long-press menu on the terminal: reliable copy/paste actions that
+// don't depend on the fiddly touch text-selection handles.
+function showTerminalMenu(x, y, tab) {
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const term = tab.term;
+  const items = [];
+  if (term.hasSelection()) {
+    items.push({ label: 'Copy selection', action: () => {
+      Clip.write(term.getSelection()); term.clearSelection(); notify('Copied', 'success');
+    }});
+  }
+  items.push({ label: 'Copy screen', action: () => {
+    const text = readViewportText(term);
+    if (text) { Clip.write(text); notify('Copied screen', 'success'); }
+  }});
+  items.push({ label: 'Paste', action: () => {
+    Clip.read().then((t) => { if (t) bracketedPaste(tab.id, t); });
+  }});
+  items.push({ label: 'Select all', action: () => { try { term.selectAll(); } catch (_) {} }});
+  for (const it of items) {
+    const mi = document.createElement('div');
+    mi.className = 'menu-item';
+    mi.textContent = it.label;
+    mi.addEventListener('click', () => { menu.classList.add('hidden'); it.action(); });
+    menu.appendChild(mi);
+  }
+  // Clamp to viewport so the menu doesn't overflow off-screen.
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(x, vw - 160) + 'px';
+  menu.style.top = Math.min(y, vh - 180) + 'px';
+  menu.classList.remove('hidden');
+}
+
+function attachTerminalLongPress(tab) {
+  if (!isTouchDevice()) return;
+  const el = tab.container;
+  let timer = null, startX = 0, startY = 0;
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { clear(); return; }
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    clear();
+    timer = setTimeout(() => {
+      timer = null;
+      showTerminalMenu(startX, startY, tab);
+    }, 500);
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (!timer) return;
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - startX) > 10 || Math.abs(t.clientY - startY) > 10) clear();
+  }, { passive: true });
+  el.addEventListener('touchend', clear, { passive: true });
+  el.addEventListener('touchcancel', clear, { passive: true });
 }
 
 // ============================================================================
@@ -1392,7 +1470,6 @@ function updateKeybarVisibility() {
   const input = $('#mobile-input');
   if (!bar || !input) return;
 
-  let composing = false;
   function activeTab() { return tabs.find((t) => t.id === activeTabId); }
   function sendChars(text) {
     const tab = activeTab();
@@ -1401,32 +1478,48 @@ function updateKeybarVisibility() {
     bridgeFor(tab).write(tab.id, text).catch((err) => console.warn('[mobile-input]', err));
   }
 
-  input.addEventListener('compositionstart', () => { composing = true; });
-  input.addEventListener('compositionend', (e) => {
-    composing = false;
-    const text = e.data || '';
-    if (text) sendChars(text);
-    // Clear AFTER the browser finishes its own compositionend
-    // bookkeeping; clearing synchronously trips some IMEs into a
-    // weird state where the next compositionstart never fires.
-    setTimeout(() => { input.value = ''; }, 0);
-  });
-
-  input.addEventListener('input', (e) => {
-    if (composing) return;
-    if (e.inputType === 'insertCompositionText') return;
+  // Flush whatever's currently staged in the input box to the PTY and
+  // clear it. Called from BOTH the input-event path (real-time
+  // streaming as the user types) AND the compositionend path (IME
+  // commit). Clearing after each flush dedupes the two — whichever
+  // fires second sees an empty box and sends nothing.
+  function flush() {
     const val = input.value;
     if (!val) return;
     sendChars(val);
     input.value = '';
+  }
+
+  // The previous version skipped inputType === 'insertCompositionText'
+  // expecting compositionend to deliver the committed text. On this
+  // WebView compositionend is unreliable, so the Chinese characters
+  // stayed stuck in the box. The robust signal is the standard
+  // event.isComposing flag: true while the IME candidate window is
+  // open, false the moment text is committed (whether by tapping a
+  // candidate or typing plain ASCII). We flush only when NOT
+  // composing, so intermediate Pinyin keystrokes never leak through.
+  input.addEventListener('input', (e) => {
+    if (e.isComposing) return;
+    flush();
   });
 
-  // Special keys: Enter, Backspace-on-empty, Tab. Other navigation
-  // (arrows, PgUp/PgDn, Ctrl-*) still goes through the keybar.
+  // Belt-and-suspenders: some IMEs fire compositionend but no
+  // trailing input event. Flush here too (flush() is idempotent
+  // thanks to the clear-after-send).
+  input.addEventListener('compositionend', () => {
+    // Defer one tick so the committed text has definitely landed in
+    // input.value before we read it.
+    setTimeout(flush, 0);
+  });
+
+  // Special keys. Enter flushes any staged text FIRST (covers the
+  // case where neither input nor compositionend delivered it) then
+  // sends the carriage return so the shell executes the command.
   input.addEventListener('keydown', (e) => {
-    if (composing) return;
+    if (e.isComposing) return;   // Enter mid-composition = commit candidate
     if (e.key === 'Enter') {
       e.preventDefault();
+      flush();
       sendChars('\r');
     } else if (e.key === 'Backspace' && !input.value) {
       e.preventDefault();
