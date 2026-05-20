@@ -43,6 +43,24 @@
         <p class="hint">All SSH connections live in this app — no server required.</p>
       </div>
     </div>
+    <!-- Visible composition input bar above the keybar.
+         Background: Android WebView's IME composition events
+         (compositionstart/end + insertCompositionText) are routed
+         by Chromium's internal content view, which our subclassed
+         WebView.onCreateInputConnection does NOT see. As a result,
+         Chinese (Pinyin) commits and Gboard English autocomplete
+         commits silently drop on the floor when typing into
+         xterm.js's hidden helper-textarea. A normal visible <input>
+         is on a different code path that WebView handles correctly;
+         all text typed here streams through to the active tab's
+         PTY. Hardware keyboards still go through the xterm path. -->
+    <div id="mobile-input-bar" class="hidden">
+      <input id="mobile-input" type="text" inputmode="text"
+             autocomplete="off" autocorrect="off"
+             autocapitalize="off" spellcheck="false"
+             enterkeyhint="send"
+             placeholder="Tap to type · Enter sends · 中文/英文都支持" />
+    </div>
     <!-- Only keys the Android soft keyboard either can't reach or
          hides under modifier pages. Punctuation (|, /, ~, etc.) is
          on the keyboard's "123" / symbols page already so it

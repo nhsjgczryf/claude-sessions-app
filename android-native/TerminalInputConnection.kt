@@ -58,11 +58,18 @@ class TerminalInputConnection(target: InputConnection) :
      *  capture point — Chinese 你好 from Pinyin lands here as a
      *  single commitText("你好", …) call. */
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
+        android.util.Log.i("ClaudeIME",
+            "commitText len=${text.length} active=${InputRouter.isActive} text=${textPreview(text)}")
         if (InputRouter.isActive && text.isNotEmpty()) {
             InputRouter.send(text.toString())
             return true
         }
         return super.commitText(text, newCursorPosition)
+    }
+
+    private fun textPreview(s: CharSequence): String {
+        val str = s.toString()
+        return if (str.length <= 16) str else str.take(16) + "…"
     }
 
     /** Composition in progress (e.g. user is mid-Pinyin, candidate

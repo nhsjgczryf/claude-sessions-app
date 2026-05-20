@@ -30,7 +30,15 @@ class ClaudeSessionsWebView : WebView {
         // the focused DOM element (form input, textarea, etc.) would
         // normally talk to. If it's null (no focused input), Android
         // wouldn't show an IME anyway, so we have nothing to wrap.
-        val base = super.onCreateInputConnection(outAttrs) ?: return null
+        val base = super.onCreateInputConnection(outAttrs)
+        // Log so `adb logcat -s ClaudeIME` reveals whether our
+        // override is actually reached. On modern Chromium WebView
+        // some IME paths bypass this hook entirely and go through an
+        // internal ContentView; the visible mobile-input-bar in JS
+        // covers that case.
+        android.util.Log.i("ClaudeIME",
+            "onCreateInputConnection: baseIC=${base != null} inputType=${outAttrs.inputType}")
+        if (base == null) return null
         return TerminalInputConnection(base)
     }
 }

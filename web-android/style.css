@@ -935,3 +935,33 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
  *   width: 1ch; height: 1em; min-width: 1px;
  *   padding: 0 1px; border: 0; opacity: 0; z-index: -5;
  */
+
+/* ============================================================
+ * Mobile composition input bar (re-introduced after the native
+ * InputConnection override failed to pick up Chromium-WebView's
+ * IME route — see TerminalInputConnection.kt for why the native
+ * fix is theoretically right but practically blocked on modern
+ * Chromium WebView). This visible <input> bypasses the broken
+ * path entirely; whatever the user types here is streamed to the
+ * PTY of the active tab. */
+#mobile-input-bar {
+  flex-shrink: 0;
+  display: flex;
+  padding: 4px 8px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
+}
+#mobile-input-bar.hidden { display: none; }
+#mobile-input {
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  outline: none;
+}
+#mobile-input:focus { border-color: var(--accent); }

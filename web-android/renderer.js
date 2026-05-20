@@ -22,6 +22,35 @@ const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
 const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
 const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
 
+// Clipboard helper. navigator.clipboard.* on Android WebView is
+// gated by user-gesture / permission policies that vary by Android
+// version + WebView build, and frequently fails silently (the
+// Promise resolves but writeText doesn't put anything on the system
+// clipboard). Capacitor's @capacitor/clipboard plugin talks to
+// android.content.ClipboardManager directly, which Just Works. We
+// route through it when present, fall back to navigator.clipboard
+// (desktop dev / Electron / web) otherwise.
+const ClipboardPlugin = window.Capacitor && window.Capacitor.Plugins &&
+  window.Capacitor.Plugins.Clipboard;
+const Clip = {
+  async write(text) {
+    if (ClipboardPlugin) {
+      try { await ClipboardPlugin.write({ string: text }); return true; }
+      catch (e) { console.warn('[clip.write] native', e); }
+    }
+    try { await navigator.clipboard.writeText(text); return true; }
+    catch (e) { console.warn('[clip.write] dom', e); return false; }
+  },
+  async read() {
+    if (ClipboardPlugin) {
+      try { const r = await ClipboardPlugin.read(); return (r && r.value) || ''; }
+      catch (e) { console.warn('[clip.read] native', e); }
+    }
+    try { return await navigator.clipboard.readText(); }
+    catch (e) { console.warn('[clip.read] dom', e); return ''; }
+  },
+};
+
 const THEME = {
   background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc',
   selectionBackground: '#585b7066',
@@ -974,7 +1003,7 @@ function attachKeyboardHandlers(tab) {
       e.preventDefault(); e.stopPropagation();
       const sel = term.getSelection();
       if (sel) {
-        navigator.clipboard.writeText(sel).catch(() => {});
+        Clip.write(sel);
         term.clearSelection();
         notify('Copied', 'success');
       }
@@ -988,14 +1017,14 @@ function attachKeyboardHandlers(tab) {
     if (e.ctrlKey && !e.shiftKey && e.code === 'KeyC') {
       if (term.hasSelection()) {
         e.preventDefault(); e.stopPropagation();
-        navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+        Clip.write(term.getSelection());
         term.clearSelection();
         return;
       }
     }
     if (e.ctrlKey && !e.shiftKey && e.code === 'KeyV') {
       e.preventDefault(); e.stopPropagation();
-      navigator.clipboard.readText().then((t) => { if (t) bracketedPaste(tabId, t); }).catch(() => {});
+      Clip.read().then((t) => { if (t) bracketedPaste(tabId, t); });
       return;
     }
     if (e.ctrlKey && !e.shiftKey && e.code === 'KeyW') {
@@ -1007,11 +1036,11 @@ function attachKeyboardHandlers(tab) {
   container.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     if (term.hasSelection()) {
-      navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+      Clip.write(term.getSelection());
       term.clearSelection();
       notify('Copied', 'success');
     } else {
-      navigator.clipboard.readText().then((t) => { if (t) bracketedPaste(tabId, t); }).catch(() => {});
+      Clip.read().then((t) => { if (t) bracketedPaste(tabId, t); });
     }
   });
   container.addEventListener('paste', (e) => {
@@ -1315,11 +1344,99 @@ function updateKeybarVisibility() {
   const tab = tabs.find((t) => t.id === activeTabId);
   const show = isTouchDevice() && !!tab;
   const bar = $('#keybar');
-  if (!bar) return;
-  const wasHidden = bar.classList.contains('hidden');
-  bar.classList.toggle('hidden', !show);
-  if (wasHidden !== !show) setTimeout(refitActiveTerminal, 50);
+  const inputBar = $('#mobile-input-bar');
+  let layoutChanged = false;
+  if (bar) {
+    const wasHidden = bar.classList.contains('hidden');
+    bar.classList.toggle('hidden', !show);
+    if (wasHidden !== !show) layoutChanged = true;
+  }
+  if (inputBar) {
+    const wasHidden = inputBar.classList.contains('hidden');
+    inputBar.classList.toggle('hidden', !show);
+    if (wasHidden !== !show) layoutChanged = true;
+  }
+  if (layoutChanged) setTimeout(refitActiveTerminal, 50);
 }
+
+// ============================================================================
+// Visible composition input bar (the working IME path)
+// ============================================================================
+//
+// Background — three attempts at fixing Chinese (Pinyin) and Gboard
+// English-autocomplete input died one after another:
+//
+//   1. CSS hack to size + on-screen xterm.js's hidden helper-textarea
+//      (see the @reference comment about xterm.js PR #3251). Made the
+//      textarea "visible enough" to IMEs, but Android WebView's IME
+//      delivery is still inconsistent.
+//   2. JavaScript belt-and-suspenders compositionend + input listeners
+//      to catch what xterm.js's CompositionHelper missed. WebView
+//      simply didn't fire either event on the off-screen textarea.
+//   3. Native InputConnectionWrapper subclass of WebView. The Cordova
+//      pattern says this should work, but modern Chromium WebView
+//      delegates IME to its private internal ContentView class — our
+//      override of WebView.onCreateInputConnection is never reached
+//      for the routes IMEs actually use.
+//
+// What works, reliably, on every Android WebView version: a normal,
+// fully-visible <input> at the bottom of the screen. compositionend
+// + input events fire on it correctly — same as in regular browser
+// pages. We stream each commit / keystroke to the active PTY.
+//
+// This is the JuiceSSH / Termius-mobile UX. Termux gets away without
+// it because Termux is a native Android app with its own TerminalView;
+// we're a WebView app and have to take the visible-input route.
+(function attachMobileInput() {
+  const bar = $('#mobile-input-bar');
+  const input = $('#mobile-input');
+  if (!bar || !input) return;
+
+  let composing = false;
+  function activeTab() { return tabs.find((t) => t.id === activeTabId); }
+  function sendChars(text) {
+    const tab = activeTab();
+    if (!tab || !tab.alive || !text) return;
+    console.log('[mobile-input] send', JSON.stringify(text));
+    bridgeFor(tab).write(tab.id, text).catch((err) => console.warn('[mobile-input]', err));
+  }
+
+  input.addEventListener('compositionstart', () => { composing = true; });
+  input.addEventListener('compositionend', (e) => {
+    composing = false;
+    const text = e.data || '';
+    if (text) sendChars(text);
+    // Clear AFTER the browser finishes its own compositionend
+    // bookkeeping; clearing synchronously trips some IMEs into a
+    // weird state where the next compositionstart never fires.
+    setTimeout(() => { input.value = ''; }, 0);
+  });
+
+  input.addEventListener('input', (e) => {
+    if (composing) return;
+    if (e.inputType === 'insertCompositionText') return;
+    const val = input.value;
+    if (!val) return;
+    sendChars(val);
+    input.value = '';
+  });
+
+  // Special keys: Enter, Backspace-on-empty, Tab. Other navigation
+  // (arrows, PgUp/PgDn, Ctrl-*) still goes through the keybar.
+  input.addEventListener('keydown', (e) => {
+    if (composing) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChars('\r');
+    } else if (e.key === 'Backspace' && !input.value) {
+      e.preventDefault();
+      sendChars('\x7f');
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      sendChars('\t');
+    }
+  });
+})();
 
 // ============================================================================
 // Native input routing
