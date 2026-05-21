@@ -222,6 +222,7 @@ function renderSessionList() {
         <button data-action="launch">Launch</button>
         <button data-action="edit">Edit</button>
         <button data-action="clone">Clone</button>
+        ${(s.type === 'remote') ? '<button data-action="live">Live</button>' : ''}
       </div>
     `;
     card.addEventListener('click', (e) => {
@@ -246,6 +247,7 @@ function renderSessionList() {
         if (action === 'launch') launchSession(s.id);
         else if (action === 'edit') openEditor(s.id);
         else if (action === 'clone') cloneSession(s.id);
+        else if (action === 'live') openLiveSessions(s);
       });
     });
     attachSessionDragHandlers(card, s.id);
@@ -512,6 +514,86 @@ function openDirPicker(agentUrl, password, startPath, onPick) {
   load(startPath);
 }
 
+// Live-sessions browser: shows the agent's currently-alive cs-* tmux
+// sessions (independent of whether any client is attached), with
+// Attach (open a tab reattached to that exact tmux) and Kill. This is
+// the "see what's alive on the server" view — the agent is the source
+// of truth, queried via /api/tmux/sessions.
+async function openLiveSessions(session) {
+  const agentUrl = (session.agent_url || '').trim();
+  const password = session.agent_password || '';
+  if (!agentUrl) { notify('This session has no agent URL', 'error'); return; }
+
+  let overlay = $('#live-sessions');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'live-sessions';
+    overlay.innerHTML =
+      '<div class="dir-picker-box">' +
+      '<div class="dir-picker-path">Live sessions on agent</div>' +
+      '<div class="dir-picker-list"></div>' +
+      '<div class="dir-picker-actions">' +
+      '<button type="button" data-act="refresh">Refresh</button>' +
+      '<button type="button" data-act="close">Close</button>' +
+      '</div></div>';
+    document.body.appendChild(overlay);
+  }
+  overlay.classList.remove('hidden');
+  const listEl = overlay.querySelector('.dir-picker-list');
+
+  async function load() {
+    listEl.innerHTML = '<div class="dir-picker-item dim">Loading…</div>';
+    try {
+      const r = await WebSocketBridge.apiGet(agentUrl, password, '/api/tmux/sessions');
+      const list = (r && r.sessions) || [];
+      listEl.innerHTML = '';
+      if (!r.tmux) {
+        listEl.innerHTML = '<div class="dir-picker-item dim">tmux not available on the agent host.</div>';
+        return;
+      }
+      if (list.length === 0) {
+        listEl.innerHTML = '<div class="dir-picker-item dim">No live cs-* sessions.</div>';
+        return;
+      }
+      for (const s of list) {
+        const ageMin = s.created ? Math.round((Date.now() / 1000 - s.created) / 60) : 0;
+        const item = document.createElement('div');
+        item.className = 'live-session-item';
+        item.innerHTML =
+          `<div class="live-session-meta">` +
+          `<div class="live-session-name">${escapeHtml(s.name)}</div>` +
+          `<div class="live-session-sub">${s.attached ? '● attached' : '○ detached'} · ${s.windows} win · ${ageMin}m</div>` +
+          `</div>` +
+          `<div class="live-session-btns">` +
+          `<button type="button" data-act="attach">Attach</button>` +
+          `<button type="button" data-act="kill">Kill</button>` +
+          `</div>`;
+        item.querySelector('[data-act="attach"]').onclick = () => {
+          overlay.classList.add('hidden');
+          launchSession(session.id, { attachTmux: s.name, sessionName: s.name });
+        };
+        item.querySelector('[data-act="kill"]').onclick = async () => {
+          if (!confirm(`Kill ${s.name}? This ends the claude session on the server.`)) return;
+          try {
+            await WebSocketBridge.apiPost(agentUrl, password, '/api/tmux/kill', { name: s.name });
+            notify(`Killed ${s.name}`, 'success');
+          } catch (err) {
+            notify('Kill failed: ' + (err && err.message || err), 'error');
+          }
+          load();
+        };
+        listEl.appendChild(item);
+      }
+    } catch (err) {
+      listEl.innerHTML = `<div class="dir-picker-item dim">Error: ${escapeHtml(String(err && err.message || err))}</div>`;
+    }
+  }
+
+  overlay.querySelector('[data-act="refresh"]').onclick = load;
+  overlay.querySelector('[data-act="close"]').onclick = () => overlay.classList.add('hidden');
+  load();
+}
+
 function updateAuthVisibility() {
   const form = $('#editor-form');
   const checked = form.querySelector('input[name="authType"]:checked');
@@ -669,6 +751,10 @@ async function launchSession(sessionId, opts) {
   const tab = {
     id: tabId, sessionId, sessionName: displayName,
     kind: sessionType,           // 'ssh' or 'local' — picks the bridge
+    // When attaching to a discovered tmux session, this is its name
+    // (cs-XXX); the remote attemptConnect uses it to reattach to that
+    // exact server-side tmux instead of keying on the tab id.
+    attachTmux: (opts && opts.attachTmux) || null,
     term, fitAddon, container, alive: false,
   };
   tabs.push(tab);
@@ -792,7 +878,10 @@ async function attemptConnect(tab) {
       // the cs- prefix). Keying on the persistent tab id means the
       // same tab always reattaches to the same tmux session, while a
       // fresh launch gets a fresh one.
-      id: tab.id,
+      // Attaching to a discovered tmux → use its name (minus the cs-
+      // prefix the server re-adds) so `tmux new -A` reattaches to it.
+      // Otherwise key on the tab id (one tmux per tab).
+      id: tab.attachTmux ? tab.attachTmux.replace(/^cs-/, '') : tab.id,
       type: 'local',
       persistent: true,
       pre_command: session.pre_command || '',

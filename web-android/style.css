@@ -1043,3 +1043,28 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   border-top: 1px solid var(--border);
   justify-content: flex-end;
 }
+
+/* Live-sessions overlay reuses #dir-picker's box look. */
+#live-sessions {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200; padding: 16px;
+}
+#live-sessions.hidden { display: none; }
+.live-session-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.live-session-meta { flex: 1; min-width: 0; }
+.live-session-name {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-session-sub { font-size: 11px; color: var(--fg-dim); margin-top: 2px; }
+.live-session-btns { flex: 0 0 auto; display: flex; gap: 6px; }

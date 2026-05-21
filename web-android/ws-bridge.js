@@ -194,5 +194,17 @@
       if (!resp.ok) throw new Error(`agent GET ${pathname} → HTTP ${resp.status}`);
       return resp.json();
     },
+
+    async apiPost(agentUrl, password, pathname, body) {
+      const token = await login(agentUrl, password);
+      const base = httpBaseFor(agentUrl);
+      const resp = await fetch(`${base}${pathname}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body || {}),
+      });
+      if (!resp.ok) throw new Error(`agent POST ${pathname} → HTTP ${resp.status}`);
+      return resp.json();
+    },
   };
 })();
