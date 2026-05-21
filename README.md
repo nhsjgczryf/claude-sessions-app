@@ -1,8 +1,12 @@
 # Claude Sessions
 
-基于 Electron + xterm.js 的桌面应用，用于同时管理多个终端会话（本地 Windows 或 SSH 远程 Linux）。每个会话可以自动启动 Claude Code，也可以只是一个纯 SSH/本地 shell，方便在同一窗口里切换远程运维和 Claude 工作流。
+一套围绕 **Claude Code** 的多端终端会话管理工具,核心是用 xterm.js 同时管理多个会话(本地 / SSH 远程 / 远程 agent),每个会话可以自动启动 Claude Code,也可以只是一个纯 shell。三种形态共享同一套会话模型与 UI:
 
-> **也支持 Web 版**：相同后端 + xterm.js 浏览器前端，手机浏览器直接打开就能用 SSH + Claude Code，详见 [`web/README.md`](web/README.md)。`npm run web` 启动。
+- **桌面版(Electron)**：本地 Windows shell + SSH 远程,可选 SOCKS-via-SSH 让本地 claude 走远端出口。本文主要讲这个。
+- **Web 版(自托管)**：`web/server.js` 跑在你的机器/VPS 上,手机或任意浏览器打开即用。服务端持有 PTY(可 tmux-backed),断开/切标签后重连无感。详见 [`web/README.md`](web/README.md)，`npm run web` 启动。
+- **Android APK**：手机原生应用,支持三种会话——直连 **SSH**、APK 内置的 **Local Linux**(proot + Alpine + claude-code,完全离线)、以及连接 Web 版服务的 **Remote agent**(WebSocket → VPS 上 tmux 里的 claude,持久化最稳)。详见下方 [Android APK](#android-apk) 一节。
+
+> 选哪个?**重度远程 claude → Remote agent 模式**(服务端持久化,断线自动重连,绕开 SSH 保活的脆弱);**懒得在 VPS 装服务 → 直连 SSH**;**没有 VPS / 想离线 → Local Linux bundle**。
 
 ![theme](https://img.shields.io/badge/theme-Catppuccin%20Mocha-cba6f7)
 ![electron](https://img.shields.io/badge/electron-%5E41.2.1-47848f)
@@ -164,78 +168,83 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 
 ## Android APK
 
-**这个 APK 不是套壳——它自己就是 SSH 客户端**。手机上跑 Capacitor + WebView（bundled xterm.js + 我们的多 tab UI），底层 SSH 由原生 Kotlin plugin 用 [sshj](https://github.com/hierynomus/sshj) 在 JVM 里维护。**不依赖外部 server**——目标 SSH 主机就是 SSH 主机，不需要在任何地方跑 `npm run web`。
+手机上跑 Capacitor + WebView(内置 xterm.js + 多 tab UI),**不是套壳**。三种会话类型并存,按场景选:
+
+| 类型 | 远端要什么 | 怎么跑 claude | 持久化 | 适合 |
+|---|---|---|---|---|
+| **SSH** | 现成 sshd | 原生 Kotlin 用 [sshj](https://github.com/hierynomus/sshj) 直连,远端 `claude` | 远端 tmux + 回前台重连 | 懒得装服务 |
+| **Local Linux** | 无 | APK 内置 proot + Alpine + claude-code,**跑在手机上** | 手机进程(wake-lock) | 离线 / 没 VPS |
+| **Remote agent** | VPS 跑 `web/server.js` | WebSocket → 服务端 PTY(tmux)里的 `claude` | **服务端 tmux,断线无感重连** | 主力,体验最稳 |
 
 ### 获取 APK
 
-1. **从 Releases 下载**：push 到 `main` 自动构建 rolling latest；打 tag 创建版本化 release。
+1. **从 Releases 下载**：push 到 `main` 自动构建 rolling latest;打 tag 创建版本化 release。
    - Latest URL: `https://github.com/<owner>/<repo>/releases/download/latest/claude-sessions-latest.apk`
-2. **本地编译**（需要 JDK 21 + Android SDK）：
+2. **本地编译**(需要 JDK 21 + Android SDK + Docker，bundle 那条用 QEMU 构建 arm64 rootfs)：
    ```bash
    npm install
    npm run android:build
    # 产物：android/app/build/outputs/apk/debug/app-debug.apk
    ```
 
-### 用法
+会话存在 Capacitor Preferences(应用沙盒,卸载一起删),**不跨设备同步**。targetSdk 锁 28——这样 Android 才允许 exec 内置的 proot / 进程,Termux/UserLAnd 同款做法,安装时系统会唠叨一句"为旧版 Android 设计",忽略即可。
 
-1. 装 APK 打开（首次会让你允许"未知来源"）
-2. 编辑 Sessions 列表里的占位 session：填 host、username、password 或 PEM 私钥；勾上 Persistent（远端用 tmux 包 shell）；`claude_cmd: claude` 让 SSH 进去就启动 claude
-3. Launch → 直接 SSH 到目标主机；多 tab 并发，每个连接独立
+### Local Linux(内置 Alpine)
 
-会话存在 Capacitor Preferences（应用沙盒，卸载一起删）。**不会跨设备同步**——多设备共享需要手动 export / import（暂未做 UI）。
+APK 自带一个 arm64 Alpine rootfs(bash / coreutils / tmux / nodejs / npm / git,**不预装 claude-code**)+ 静态 proot。首次启动某个 Local Linux 会话时解压 rootfs 到应用私有目录(~30s 一次性),之后秒进 `alpine:/root#`。
 
-#### 想要"手机本机的 bash" tab
+- 装 claude:`HTTPS_PROXY=... npm i -g @anthropic-ai/claude-code`(受限网络先设代理;欢迎横幅里有提示)
+- 不预装是因为受限地区没代理装了也用不了,且能省 CI 时间 + APK 体积
+- CI 在 QEMU arm64 容器里构建 `alpine-rootfs.tar.zst` + 静态 proot,详见 [`scripts/build-alpine-rootfs.sh`](scripts/build-alpine-rootfs.sh)
 
-装 [Termux](https://f-droid.org/en/packages/com.termux/) + [Termux:Boot](https://f-droid.org/en/packages/com.termux.boot/)（都从 F-Droid），跑一次 sshd + 设密码 + 加开机自启脚本，然后用 APK 里预设的 **`Termux (this phone)`** session 连 `127.0.0.1:8022` 即可。完整步骤约 5 分钟一次性配置：[docs/TERMUX-SETUP.md](docs/TERMUX-SETUP.md)。
+> 旧的 "Termux 旁挂 sshd 连 127.0.0.1:8022" 方案([docs/TERMUX-SETUP.md](docs/TERMUX-SETUP.md))已被内置 Local Linux 取代,不再需要装 Termux。
 
-这套配完之后，"远端 VPS 的 SSH tab" 和 "手机本机 Termux bash tab" 在 APK 里平级混用——两边都跑 tmux 持久化、都能 SCP 图片、都接 `claude` 命令。
+### Remote agent(连 web/server.js)
 
-### 功能对照（vs 桌面/Web 版）
+把持久化的责任放到 24h 不睡的 VPS 上——手机随便断,回来重连 reattach,**不用 wake-lock 硬扛后台**(SSH 模式那条的痛点)。
 
-| 功能 | APK |
-|---|---|
-| 多 tab SSH 会话 | ✅ |
-| tmux 持久化 (`persistent`) | ✅（tmux 在远端起，逻辑跟桌面版一致） |
-| Port forwards (`-L`) | ✅（sshj 的 `LocalPortForwarder`） |
-| 图片粘贴到远端 | ✅（系统相册 → SFTP 直接 PUT 到 `/tmp/claude-clipboard/`） |
-| 键盘工具条（Ctrl/Tab/方向键/...） | ✅ |
-| 后台保活 | ✅（foreground service + 持久通知） |
-| 重连提示（Press R） | ✅ |
-| 触屏滚动 scrollback | ✅ |
-| ProxyJump | ❌（计划中） |
-| Web tab (iframe 反代) | ❌（APK 没有反代后端） |
-| 凭证用 Android Keystore 加密 | ❌（当前明文存 Preferences，下个迭代加） |
-
-### 架构图
-
+**VPS 一侧**(一次性):
+```bash
+git clone … && cd claude-sessions-app && npm install
+CS_PASSWORD='挑一个密码' HOST=0.0.0.0 PORT=3000 node web/server.js
+# 要用 run_as(以别的 Linux 用户跑会话)就以 root 起这个进程
+# 生产环境务必挂 caddy/nginx 上 TLS,或绑内网/VPN
 ```
-┌──── Android APK ─────────────────────────────────────────┐
-│                                                           │
-│  WebView (Capacitor)                                      │
-│   ├── xterm.js (bundled)                                  │
-│   ├── renderer.js (sessions + multi-tab UI)               │
-│   └── ssh-bridge.js  ◄── JS-side wrapper                  │
-│         │                                                 │
-│         ▼ Capacitor JS ↔ Native bridge                    │
-│                                                           │
-│  SshPlugin.kt (com.hierynomus.sshj)                       │
-│   ├── connect / write / resize / close                    │
-│   ├── sftpPut（图片上传）                                  │
-│   ├── port forwards (LocalPortForwarder)                  │
-│   └── ForegroundService（持久通知 → 进程保活）              │
-│         │                                                 │
-│         ▼ TCP / SSH                                       │
-└─────────│─────────────────────────────────────────────────┘
-          │
-   任何 SSH 主机（VPS / dev box / 内网机器）
-```
+`CS_PASSWORD` 跳过一次性注册码流程,直接设密码(可设成跟 SSH 一样那串)。
+
+**APK 一侧**:新建会话选 **Remote agent**,填:
+- Agent URL:`wss://你的VPS:3000`(测试可用 `ws://`,targetSdk 28 允许明文)
+- Agent password:上面的 `CS_PASSWORD`
+- Run as:留空 = agent 自己的用户;填 `root` / 某用户 = 服务端 `su -` 切过去(需 agent 以 root 跑)
+- Working Dir:点 **Browse** 浏览 VPS 目录选一个项目
+- Claude Cmd:`claude`
+
+Launch → claude 在 VPS 上、指定用户、持久 tmux(`cs-<id>`)里跑。会话卡片上的 **Live** 按钮列出 VPS 上所有活着的 `cs-*` 会话,可 Attach(接回那个确切会话)/ Kill。
+
+### 移动端输入
+
+xterm.js 的隐藏 textarea 在 Android WebView 上 IME(中文等)不可靠(详见 `android-native/TerminalInputConnection.kt` 的注释),所以终端下方有一个**可见的多行输入框**:打字在框里(中文/英文都行)→ Enter 或 ↵ 按钮发送 → `\r` 执行。点终端本身不会弹键盘(走可见框输入)。下面一排 keybar 面向 claude:`Esc · ⇧⇥(切模式) · Tab · 方向键 · PgUp/PgDn · ^C · Ctrl`。
+
+### 功能对照
+
+| 功能 | SSH | Local Linux | Remote agent |
+|---|---|---|---|
+| 跑 claude | 远端 | 手机本机 | VPS |
+| 持久化 | 远端 tmux | 手机进程 | **服务端 tmux** |
+| 断线重连 | 回前台重连(SSH 脆) | 不涉及 | **WS 自动 reattach** |
+| 多 tab | ✅ | ✅ | ✅ |
+| 端口转发 `-L` | ✅(sshj) | — | — |
+| 图片上传 | ✅(SFTP) | 本机 | (走服务端) |
+| 列服务端活跃会话 | — | — | ✅(Live) |
+| 按 Linux 用户跑 | — | — | ✅(run_as) |
+| 目录浏览选择 | — | — | ✅(Browse) |
 
 ### 安全注意
 
-- **私钥/密码当前明文存 Capacitor Preferences**（应用沙盒）。root 过的手机的 root 用户能读到。下版本上 Android Keystore。
-- **Host key 当前不验证**（用了 `PromiscuousVerifier`），有中间人攻击风险。下版本加 `known_hosts` 校验。
-- Debug 签名，第一次安装 Android 会唠叨"未知来源"——sideload 装即可。
+- **凭证(SSH 密码/私钥、agent 密码)当前明文存 Capacitor Preferences**(应用沙盒)。下版本上 Android Keystore。
+- SSH 模式 **host key 当前不验证**(`PromiscuousVerifier`),有中间人风险。下版本加 `known_hosts`。
+- **Remote agent 的 `run_as` 需要 agent 以 root 跑**——一个联网的 root 进程,务必 TLS + 强密码 + 最好绑内网/VPN。
+- Debug 签名,sideload 安装。
 
 ## 技术栈
 
@@ -269,14 +278,29 @@ SSH 会话勾选 **Persistent** 后，远程命令会被包进一个命名为 `c
 
 ```
 claude-sessions-app/
-├── package.json
-├── main.js            # Electron 主进程
-├── preload.js         # contextBridge API（为未来安全模式准备）
-├── renderer.js        # UI 核心逻辑
-├── index.html
-├── style.css          # Catppuccin Mocha
-├── sessions.json      # 用户会话配置
-└── docs/TECHNICAL.md  # 技术文档
+├── main.js / preload.js / renderer.js / index.html / style.css   # Electron 桌面版
+├── lib/
+│   ├── session-runtime.js   # 共享的命令构造(SSH/local/tmux 包装),桌面+web 共用
+│   ├── auth.js              # web 版单账号鉴权(scrypt + CS_PASSWORD bootstrap)
+│   └── socks-tunnel.js      # SOCKS-via-SSH
+├── web/
+│   ├── server.js            # 自托管 agent:Express + ws,tmux-backed PTY,
+│   │                        #   /api/tmux/{sessions,kill}、/api/fs/list、token 鉴权
+│   └── public/              # 浏览器前端(xterm.js + WebSocket transport)
+├── web-android/             # APK 的 WebView 内容
+│   ├── renderer.js          # 多 tab UI + 三种 bridge 的调度
+│   ├── ssh-bridge.js / local-shell-bridge.js / ws-bridge.js   # 三种传输
+│   └── index.html / style.css
+├── android-native/          # 原生 Kotlin + JNI(被 scripts/android-init.js 拷进 Android 工程)
+│   ├── SshPlugin.kt         # sshj
+│   ├── LocalShellPlugin.kt + Pty.kt + jni/pty.c   # 内置 Alpine 的 PTY
+│   ├── ClaudeSessionsWebView.kt + TerminalInputConnection.kt   # WebView IME 拦截
+│   └── ForegroundService.kt + KeepAlive.kt        # 后台保活
+├── scripts/
+│   ├── android-init.js            # 生成/同步 Capacitor Android 工程
+│   └── build-alpine-rootfs.sh     # CI 在 QEMU 里构建 proot + Alpine rootfs
+├── .github/workflows/build-apk.yml
+└── docs/TECHNICAL.md
 ```
 
 ## License
