@@ -990,3 +990,56 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   font-weight: 700;
 }
 #mobile-input-send:active { opacity: 0.7; }
+
+/* Working-dir browse row (remote sessions). */
+.dir-pick-row { display: flex; gap: 6px; }
+.dir-pick-row input { flex: 1; min-width: 0; }
+.dir-pick-row button { flex: 0 0 auto; }
+
+/* Directory picker overlay (browses the agent's filesystem). */
+#dir-picker {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 16px;
+}
+#dir-picker.hidden { display: none; }
+.dir-picker-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dir-picker-path {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--accent);
+  word-break: break-all;
+}
+.dir-picker-list { flex: 1; overflow-y: auto; }
+.dir-picker-item {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 14px;
+}
+.dir-picker-item:active { background: var(--bg-hover); }
+.dir-picker-item.dim { color: var(--fg-dim); cursor: default; }
+.dir-picker-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+}

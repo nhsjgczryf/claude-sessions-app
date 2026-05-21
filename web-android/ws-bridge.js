@@ -179,5 +179,20 @@
     onExit(cb)    { exitListeners.add(cb);    return () => exitListeners.delete(cb); },
     onStatus(cb)  { statusListeners.add(cb);  return () => statusListeners.delete(cb); },
     onWarning(cb) { warningListeners.add(cb); return () => warningListeners.delete(cb); },
+
+    // Authenticated GET against the agent's HTTP API (e.g. the
+    // directory browser). Logs in for a fresh token each call —
+    // cheap enough for occasional picker use, and avoids coupling to
+    // the WS connection lifecycle.
+    async apiGet(agentUrl, password, pathname, query) {
+      const token = await login(agentUrl, password);
+      const base = httpBaseFor(agentUrl);
+      const qs = new URLSearchParams(query || {});
+      const url = `${base}${pathname}?${qs.toString()}`;
+      // Token via Authorization header (requireAuth accepts Bearer).
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) throw new Error(`agent GET ${pathname} → HTTP ${resp.status}`);
+      return resp.json();
+    },
   };
 })();

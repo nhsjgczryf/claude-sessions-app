@@ -125,6 +125,19 @@
           </div>
         </div>
 
+        <div class="field remote-only">
+          <label>Run as <span class="dim">(Linux user on the VPS; empty = the agent's own user. Needs the agent running as root.)</span></label>
+          <input type="text" name="run_as" placeholder="root" autocomplete="off" autocapitalize="none" spellcheck="false" />
+        </div>
+
+        <div class="field remote-only">
+          <label>Working Dir <span class="dim">(on the VPS)</span></label>
+          <div class="dir-pick-row">
+            <input type="text" name="remote_working_dir" placeholder="/home/user/project" autocomplete="off" autocapitalize="none" spellcheck="false" />
+            <button type="button" id="btn-browse-dir" title="Browse directories on the agent">Browse</button>
+          </div>
+        </div>
+
         <div class="field-row ssh-only">
           <div class="field grow">
             <label>Host</label>

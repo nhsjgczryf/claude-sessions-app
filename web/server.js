@@ -75,7 +75,7 @@ if (TRUST_PROXY) app.set('trust proxy', true);
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -128,8 +128,16 @@ function clientIp(req) {
 // ---- middlewares -----------------------------------------------------
 
 function requireAuth(req, res, next) {
+  // Browser: HttpOnly cookie. Native APK (cross-origin, can't read or
+  // send that cookie): a token via ?token= or Authorization: Bearer.
   const cookies = parseCookies(req);
-  const session = auth.getSession(cookies.cs_session);
+  let token = cookies.cs_session;
+  if (!token && req.query && req.query.token) token = String(req.query.token);
+  if (!token) {
+    const authz = req.headers && req.headers.authorization;
+    if (authz && /^Bearer\s+/i.test(authz)) token = authz.replace(/^Bearer\s+/i, '').trim();
+  }
+  const session = auth.getSession(token);
   if (!session) return res.status(401).json({ error: 'unauthenticated' });
   req.user = session.username;
   next();

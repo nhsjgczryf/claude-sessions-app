@@ -333,7 +333,7 @@ const SESSION_FIELDS = [
   'password', 'privateKey', 'privateKeyPassphrase',
   'port_forwards', 'working_dir', 'pre_command',
   'claude_cmd', 'claude_args', 'description',
-  'agent_url', 'agent_password',
+  'agent_url', 'agent_password', 'run_as', 'remote_working_dir',
 ];
 
 // Android keyboards shrink visualViewport.height when they appear,
@@ -370,6 +370,11 @@ function openEditor(sessionId) {
   for (const key of SESSION_FIELDS) {
     const input = form.elements[key];
     if (input) input.value = values[key] != null ? values[key] : '';
+  }
+  // remote_working_dir is the form field; the stored field is the
+  // shared working_dir. Mirror it in for remote sessions.
+  if (form.elements['remote_working_dir']) {
+    form.elements['remote_working_dir'].value = values.working_dir || '';
   }
   if (form.elements['persistent']) form.elements['persistent'].checked = !!values.persistent;
   const sessionType = values.type || 'ssh';
@@ -433,6 +438,80 @@ function closeEditor() {
   syncNativeInputRoute();
 }
 
+// Directory picker for remote-agent sessions: browse the VPS's
+// filesystem via the agent's /api/fs/list and fill remote_working_dir.
+(function wireDirBrowse() {
+  const btn = $('#btn-browse-dir');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const form = $('#editor-form');
+    const agentUrl = (form.elements['agent_url'] && form.elements['agent_url'].value || '').trim();
+    const password = (form.elements['agent_password'] && form.elements['agent_password'].value) || '';
+    if (!agentUrl) { notify('Set the Agent URL first', 'error'); return; }
+    const start = (form.elements['remote_working_dir'] && form.elements['remote_working_dir'].value || '').trim();
+    openDirPicker(agentUrl, password, start, (chosen) => {
+      if (form.elements['remote_working_dir']) form.elements['remote_working_dir'].value = chosen;
+    });
+  });
+})();
+
+function openDirPicker(agentUrl, password, startPath, onPick) {
+  let overlay = $('#dir-picker');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'dir-picker';
+    overlay.innerHTML =
+      '<div class="dir-picker-box">' +
+      '<div class="dir-picker-path"></div>' +
+      '<div class="dir-picker-list"></div>' +
+      '<div class="dir-picker-actions">' +
+      '<button type="button" data-act="cancel">Cancel</button>' +
+      '<button type="button" data-act="select">Select this dir</button>' +
+      '</div></div>';
+    document.body.appendChild(overlay);
+  }
+  overlay.classList.remove('hidden');
+  let current = startPath || '';
+  const pathEl = overlay.querySelector('.dir-picker-path');
+  const listEl = overlay.querySelector('.dir-picker-list');
+
+  async function load(path) {
+    pathEl.textContent = 'Loading…';
+    listEl.innerHTML = '';
+    try {
+      const r = await WebSocketBridge.apiGet(agentUrl, password, '/api/fs/list', path ? { path } : {});
+      current = r.path;
+      pathEl.textContent = r.path;
+      const rows = [];
+      if (r.parent) rows.push({ name: '.. (up)', path: r.parent });
+      for (const d of r.dirs) rows.push({ name: d, path: (r.path.endsWith('/') ? r.path : r.path + '/') + d });
+      listEl.innerHTML = '';
+      for (const row of rows) {
+        const div = document.createElement('div');
+        div.className = 'dir-picker-item';
+        div.textContent = row.name;
+        div.addEventListener('click', () => load(row.path));
+        listEl.appendChild(div);
+      }
+      if (rows.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'dir-picker-item dim';
+        empty.textContent = '(no subdirectories)';
+        listEl.appendChild(empty);
+      }
+    } catch (err) {
+      pathEl.textContent = 'Error: ' + (err && err.message || err);
+    }
+  }
+
+  overlay.querySelector('[data-act="cancel"]').onclick = () => overlay.classList.add('hidden');
+  overlay.querySelector('[data-act="select"]').onclick = () => {
+    overlay.classList.add('hidden');
+    if (onPick) onPick(current);
+  };
+  load(startPath);
+}
+
 function updateAuthVisibility() {
   const form = $('#editor-form');
   const checked = form.querySelector('input[name="authType"]:checked');
@@ -466,10 +545,15 @@ async function saveEditor(e) {
     privateKey: type === 'ssh' && authType === 'key' ? (data.get('privateKey') || '').toString() : '',
     privateKeyPassphrase: type === 'ssh' && authType === 'key' ? (data.get('privateKeyPassphrase') || '').toString() : '',
     port_forwards: type === 'ssh' ? (data.get('port_forwards') || '').toString().trim() : '',
-    working_dir: (data.get('working_dir') || '').toString().trim(),
+    // working_dir is shared; for remote sessions it comes from the
+    // browsable remote_working_dir field instead of the ssh one.
+    working_dir: type === 'remote'
+      ? (data.get('remote_working_dir') || '').toString().trim()
+      : (data.get('working_dir') || '').toString().trim(),
     // Remote-agent transport fields.
     agent_url: type === 'remote' ? agentUrl : '',
     agent_password: type === 'remote' ? (data.get('agent_password') || '').toString() : '',
+    run_as: type === 'remote' ? (data.get('run_as') || '').toString().trim() : '',
     pre_command: (data.get('pre_command') || '').toString(),
     claude_cmd: (data.get('claude_cmd') || '').toString().trim(),
     claude_args: (data.get('claude_args') || '').toString(),
@@ -715,6 +799,7 @@ async function attemptConnect(tab) {
       claude_cmd: session.claude_cmd || '',
       claude_args: session.claude_args || '',
       working_dir: session.working_dir || '',
+      run_as: session.run_as || '',     // server su's into this Linux user
     };
     await WebSocketBridge.connect({
       tabId: tab.id,
