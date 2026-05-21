@@ -42,19 +42,25 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 
-// Print the one-time registration code if no account is set up yet.
-const initialCode = auth.ensureRegistrationCode();
-if (initialCode) {
-  console.log('\n' + '='.repeat(60));
-  console.log(' [claude-sessions] No account exists yet.');
-  console.log(' Register on the web UI with this one-time code:');
-  console.log('');
-  console.log('   REGISTRATION CODE: ' + initialCode);
-  console.log('');
-  console.log(' (Code is invalidated after first successful registration');
-  console.log('  or whenever the server restarts.)');
-  console.log('='.repeat(60) + '\n');
-}
+// If CS_PASSWORD is set, provision the single account from env so
+// there's no one-time-code registration step. Otherwise fall back to
+// printing the registration code for the browser flow.
+auth.bootstrapFromEnv().then((bootstrapped) => {
+  if (bootstrapped) return;
+  const initialCode = auth.ensureRegistrationCode();
+  if (initialCode) {
+    console.log('\n' + '='.repeat(60));
+    console.log(' [claude-sessions] No account exists yet.');
+    console.log(' Register on the web UI with this one-time code,');
+    console.log(' OR restart with CS_PASSWORD=<your-password> set:');
+    console.log('');
+    console.log('   REGISTRATION CODE: ' + initialCode);
+    console.log('');
+    console.log(' (Code is invalidated after first successful registration');
+    console.log('  or whenever the server restarts.)');
+    console.log('='.repeat(60) + '\n');
+  }
+}).catch((err) => console.error('[auth] bootstrap failed:', err));
 
 const app = express();
 if (TRUST_PROXY) app.set('trust proxy', true);
@@ -207,6 +213,38 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/api/sessions', (_req, res) => res.json(loadSessions()));
+
+// ---- directory browser (for the working-dir picker) -----------------
+//
+// Lists subdirectories of `path` so the client can offer a "browse"
+// picker instead of making the user type an absolute path. Auth-gated.
+// Returns the resolved absolute path, its parent, and the immediate
+// child directories. Symlinks are followed for the listing but we
+// only report directories.
+app.get('/api/fs/list', (req, res) => {
+  let dir = (req.query.path || os.homedir()).toString();
+  try {
+    dir = path.resolve(dir);
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const dirs = entries
+      .filter((e) => {
+        if (e.name.startsWith('.')) return false;          // hide dotdirs
+        try {
+          return e.isDirectory() ||
+            (e.isSymbolicLink() && fs.statSync(path.join(dir, e.name)).isDirectory());
+        } catch (_) { return false; }
+      })
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+    res.json({
+      path: dir,
+      parent: path.dirname(dir) === dir ? null : path.dirname(dir),
+      dirs,
+    });
+  } catch (err) {
+    res.status(400).json({ error: String(err && err.message || err), path: dir });
+  }
+});
 
 // ---- tmux session discovery -----------------------------------------
 //
@@ -514,10 +552,6 @@ wss.on('connection', (ws) => {
           ? session.working_dir
           : os.homedir()
         : os.homedir();
-    const shell = process.platform === 'win32'
-      ? 'powershell.exe'
-      : (process.env.SHELL || 'bash');
-    const shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
 
     let env = { ...process.env };
     let releaseTunnel = null;
@@ -529,15 +563,44 @@ wss.on('connection', (ws) => {
       releaseTunnel = () => tun.release();
     }
 
+    // run_as: launch the session as a different Linux user. Requires
+    // this server to run as root (su - <user> needs no password only
+    // for root). Empty / unset = run as the server's own identity.
+    // Validated to [A-Za-z0-9._-] and confirmed to exist before we
+    // hand it to su, so it can't be turned into argument injection.
+    const runAs = (process.platform !== 'win32' && session.run_as)
+      ? String(session.run_as).trim() : '';
+    let shell, shellArgs, spawnCwd = cwd;
+    if (runAs) {
+      if (!/^[A-Za-z0-9._-]+$/.test(runAs)) {
+        throw new Error(`invalid run_as username: ${runAs}`);
+      }
+      if (process.getuid && process.getuid() !== 0) {
+        throw new Error('run_as requires the server to run as root');
+      }
+      // `su - <user>` = interactive login shell as that user, with
+      // their environment + a clean PAM session. The login shell cds
+      // to the user's home, so we honor working_dir by cd-ing in the
+      // startup command (sendStartupForSession) rather than via cwd.
+      shell = 'su';
+      shellArgs = ['-', runAs];
+      // su sets up cwd itself; spawning in / avoids EACCES if the
+      // server's cwd isn't readable by the target user.
+      spawnCwd = '/';
+    } else {
+      shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash');
+      shellArgs = process.platform === 'win32' ? ['-NoLogo', '-NoExit'] : [];
+    }
+
     const term = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols: cols || 120,
       rows: rows || 30,
-      cwd,
+      cwd: spawnCwd,
       env,
       useConpty: process.platform === 'win32',
     });
-    return { pty: term, releaseTunnel };
+    return { pty: term, releaseTunnel, runAs };
   }
 
   ws.on('message', async (raw) => {
@@ -587,9 +650,9 @@ wss.on('connection', (ws) => {
       }
 
       // Fresh spawn.
-      let term, releaseTunnel;
+      let term, releaseTunnel, runAs;
       try {
-        ({ pty: term, releaseTunnel } = await spawnSessionPty(session, cols, rows));
+        ({ pty: term, releaseTunnel, runAs } = await spawnSessionPty(session, cols, rows));
       } catch (err) {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
@@ -614,7 +677,7 @@ wss.on('connection', (ws) => {
       ptys.set(tabId, entry);
       attached.add(tabId);
       attachTermHandlers(tabId, entry);
-      sendStartupForSession(term, session);
+      sendStartupForSession(term, session, runAs);
 
       send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'reconnect') {
@@ -630,9 +693,9 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'error', tabId, error: 'no session config available for reconnect' });
         return;
       }
-      let term, releaseTunnel;
+      let term, releaseTunnel, runAs;
       try {
-        ({ pty: term, releaseTunnel } = await spawnSessionPty(sessionForSpawn, cols, rows));
+        ({ pty: term, releaseTunnel, runAs } = await spawnSessionPty(sessionForSpawn, cols, rows));
       } catch (err) {
         send(ws, { type: 'error', tabId, error: String(err && err.message || err) });
         return;
@@ -658,7 +721,7 @@ wss.on('connection', (ws) => {
       }
       attached.add(tabId);
       attachTermHandlers(tabId, entry);
-      sendStartupForSession(term, entry.session);
+      sendStartupForSession(term, entry.session, runAs);
       send(ws, { type: 'ready', tabId });
     } else if (msg.type === 'input') {
       const e = ptys.get(msg.tabId);
@@ -707,11 +770,19 @@ wss.on('connection', (ws) => {
     });
   }
 
-  function sendStartupForSession(term, session) {
+  function sendStartupForSession(term, session, runAs) {
     setTimeout(() => {
       try {
         if (session.type === 'local') {
-          const cmd = buildLocalCommand(session);
+          let cmd = buildLocalCommand(session);
+          // When run_as switched us into a `su - <user>` login shell,
+          // that shell starts in the target user's home — the pty cwd
+          // we'd normally rely on is gone. cd into working_dir first
+          // so the session (and its tmux) start in the right project.
+          if (runAs && session.working_dir) {
+            const dir = String(session.working_dir).replace(/'/g, `'\\''`);
+            cmd = `cd '${dir}' 2>/dev/null; ${cmd}`;
+          }
           if (cmd.trim()) term.write(cmd + '\r');
         } else if (session.type === 'ssh' && session.ssh_host) {
           term.write(buildSshCommand(session) + '\r');
