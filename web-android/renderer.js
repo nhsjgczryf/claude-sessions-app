@@ -379,6 +379,7 @@ function openEditor(sessionId) {
     form.elements['remote_working_dir'].value = values.working_dir || '';
   }
   if (form.elements['persistent']) form.elements['persistent'].checked = !!values.persistent;
+  if (form.elements['skip_permissions']) form.elements['skip_permissions'].checked = !!values.skip_permissions;
   const sessionType = values.type || 'ssh';
   const typeRadio = form.querySelector(`input[name="type"][value="${sessionType}"]`);
   if (typeRadio) typeRadio.checked = true;
@@ -641,6 +642,7 @@ async function saveEditor(e) {
     claude_args: (data.get('claude_args') || '').toString(),
     description: (data.get('description') || '').toString(),
     persistent: !!form.elements['persistent'] && form.elements['persistent'].checked,
+    skip_permissions: !!form.elements['skip_permissions'] && form.elements['skip_permissions'].checked,
   };
   if (editingId) {
     const idx = sessions.findIndex((s) => s.id === editingId);
@@ -827,6 +829,19 @@ async function launchSession(sessionId, opts) {
   await connectOrRetry(tab, /*isInitial*/ true);
 }
 
+// Effective claude args = the configured args plus the
+// --dangerously-skip-permissions flag when the session opted into it.
+// Skipping permission prompts speeds up claude a lot (it stops asking
+// before every file edit / command) but lets it act without
+// confirmation — only sensible in environments you trust.
+function effectiveClaudeArgs(session) {
+  let a = (session.claude_args || '').trim();
+  if (session.skip_permissions) {
+    a = (a + ' --dangerously-skip-permissions').trim();
+  }
+  return a;
+}
+
 // Single connect attempt against the session config. Reads everything
 // off the tab so the same function can be reused by initial launch,
 // auto-reconnect, and the R-keypress fallback.
@@ -850,8 +865,8 @@ async function attemptConnect(tab) {
     const initParts = [];
     if (session.pre_command) initParts.push(session.pre_command);
     if (session.claude_cmd && session.claude_cmd.trim()) {
-      const args = session.claude_args ? ` ${session.claude_args}` : '';
-      initParts.push(`${session.claude_cmd.trim()}${args}`);
+      const args = effectiveClaudeArgs(session);
+      initParts.push(`${session.claude_cmd.trim()}${args ? ' ' + args : ''}`);
     }
     const initialCommand = initParts.join('; ');
     await LocalShellBridge.connect({
@@ -886,7 +901,7 @@ async function attemptConnect(tab) {
       persistent: true,
       pre_command: session.pre_command || '',
       claude_cmd: session.claude_cmd || '',
-      claude_args: session.claude_args || '',
+      claude_args: effectiveClaudeArgs(session),
       working_dir: session.working_dir || '',
       run_as: session.run_as || '',     // server su's into this Linux user
     };
@@ -903,8 +918,10 @@ async function attemptConnect(tab) {
     return;
   }
 
-  // SSH path (existing).
-  const initialCommand = SessionBuilder.buildRemoteCmd(session, { tmuxName: tab.tmuxName });
+  // SSH path (existing). Fold skip-permissions into claude_args via a
+  // shallow copy so buildRemoteCmd picks it up.
+  const sshSession = { ...session, claude_args: effectiveClaudeArgs(session) };
+  const initialCommand = SessionBuilder.buildRemoteCmd(sshSession, { tmuxName: tab.tmuxName });
   const portForwards = SessionBuilder.parsePortForwards(session.port_forwards);
   await SshBridge.connect({
     tabId: tab.id,
@@ -1653,6 +1670,18 @@ function keybarBytesFor(action) {
     if (action === 'mod:ctrl') { setCtrlArmed(!ctrlArmed); return; }
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab || !tab.alive) return;
+
+    // Backspace is special: text lives in the compose box, so when it
+    // has content we delete a char there (reliable, doesn't depend on
+    // the IME's flaky delete). Only when the box is empty do we send a
+    // real backspace byte to the PTY (for TUIs doing their own line
+    // editing). This is the "reliable delete key" the user asked for.
+    if (action === 'key:Backspace') {
+      if (composeBackspace()) return;
+      bridgeFor(tab).write(tab.id, '\x7f').catch(() => {});
+      return;
+    }
+
     let bytes = keybarBytesFor(action);
     if (bytes == null) return;
     if (action.startsWith('char:')) bytes = applyCtrlIfArmed(bytes);
@@ -1739,11 +1768,24 @@ function updateKeybarVisibility() {
   // fully visible (wraps) instead of scrolling off a single-line
   // field — that was the "can't see what I typed" complaint.
   const MAX_PX = 152;   // ~6 lines; matches the CSS max-height
+  let composing = false;
+  // Toggling height to 'auto' to measure scrollHeight forces a reflow
+  // that, on Android WebView, snaps the caret to the END of the
+  // textarea. That's the "insert Chinese in the middle → caret jumps
+  // to the end" bug. We save the caret before the reflow and restore
+  // it after — but NOT while an IME composition is active, because
+  // setSelectionRange would break the composition region. During
+  // composition we skip the resize entirely and catch up on
+  // compositionend.
   function autoGrow() {
+    if (composing) return;
+    const s = input.selectionStart;
+    const e = input.selectionEnd;
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, MAX_PX) + 'px';
+    try { input.setSelectionRange(s, e); } catch (_) {}
   }
-  function clearBox() { input.value = ''; autoGrow(); }
+  function clearBox() { input.value = ''; input.style.height = 'auto'; }
 
   // Send the composed text, then a carriage return so the shell / TUI
   // executes it. Multi-line content is wrapped in bracketed paste so
@@ -1763,6 +1805,7 @@ function updateKeybarVisibility() {
   }
 
   input.addEventListener('input', autoGrow);
+  input.addEventListener('compositionstart', () => { composing = true; });
 
   // Enter submits; Shift+Enter inserts a newline (default textarea
   // behavior — we just let it through and re-grow). Enter pressed
@@ -1772,6 +1815,7 @@ function updateKeybarVisibility() {
   // "/clear" + Enter still executes.
   let pendingEnter = false;
   input.addEventListener('compositionend', () => setTimeout(() => {
+    composing = false;
     autoGrow();
     if (pendingEnter) { pendingEnter = false; submitLine(); }
   }, 0));
@@ -1795,7 +1839,33 @@ function updateKeybarVisibility() {
       try { input.focus(); } catch (_) {}
     });
   }
+
+  // Reliable backspace for the compose box, used by the keybar ⌫ key
+  // (the soft-keyboard's own delete is flaky on some Android IMEs).
+  // Deletes the selection if any, else the char before the caret.
+  // Returns true if it acted (box had content), false if empty.
+  window.__composeBackspace = function () {
+    if (!input.value) return false;
+    let s = input.selectionStart, e = input.selectionEnd;
+    if (typeof s !== 'number') { s = e = input.value.length; }
+    if (s === e) {
+      if (s === 0) return false;
+      input.value = input.value.slice(0, s - 1) + input.value.slice(s);
+      s = s - 1;
+    } else {
+      input.value = input.value.slice(0, s) + input.value.slice(e);
+    }
+    // Set the caret for when the box next has focus; don't force
+    // focus() here — that would pop the soft keyboard on a plain ⌫ tap.
+    try { input.setSelectionRange(s, s); } catch (_) {}
+    autoGrow();
+    return true;
+  };
 })();
+
+function composeBackspace() {
+  return typeof window.__composeBackspace === 'function' && window.__composeBackspace();
+}
 
 // ============================================================================
 // Native input routing

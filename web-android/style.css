@@ -857,9 +857,14 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 #keybar {
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
+  /* Wrap instead of horizontal-scroll: on a wide screen (landscape)
+   * all keys fit one row; on a narrow screen (portrait) they wrap to
+   * a second row so every key is reachable without the non-obvious
+   * sideways scroll. Height changes on rotation trigger a terminal
+   * refit via the window resize handler. */
+  flex-wrap: wrap;
+  justify-content: center;
+  overflow: hidden;
   gap: 4px;
   padding: 4px 6px;
   /* Leave room for system gesture bars / iPhone home indicator. */
@@ -867,8 +872,6 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   background: var(--bg2);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
-  scrollbar-width: thin;
-  touch-action: pan-x;
   /* Suppress the white "tap highlight" overlay on iOS Safari */
   -webkit-tap-highlight-color: transparent;
 }
