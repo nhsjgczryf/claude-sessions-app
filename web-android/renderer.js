@@ -1663,6 +1663,17 @@ function keybarBytesFor(action) {
 (function wireKeybar() {
   const bar = $('#keybar');
   if (!bar) return;
+  // Keep the soft keyboard exactly as it is when a keybar button is
+  // tapped. A <button> normally grabs focus on press, which yanks it
+  // off the compose box and dismisses the keyboard. preventDefault on
+  // mousedown (Android WebView fires it on tap, before focus moves)
+  // stops the focus transfer — so if the compose box was focused it
+  // stays focused (keyboard stays up), and if nothing was focused the
+  // keyboard stays down (no surprise pop). The click still fires, so
+  // the action below runs normally.
+  bar.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button[data-keybar]')) e.preventDefault();
+  });
   bar.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-keybar]');
     if (!btn) return;

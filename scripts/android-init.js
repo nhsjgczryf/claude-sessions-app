@@ -99,7 +99,24 @@ function copyNativeSources() {
   }
   copyJniSources();
   copyResources();
+  copyKeystore();
   patchMainActivity(dst);
+}
+
+// Copy the committed fixed signing keystore into the app module so
+// app/build.gradle's signingConfigs.debug { storeFile
+// file('claude-sessions.keystore') } resolves. Keeping one stable
+// key across CI builds is what lets the user install updates over the
+// top instead of uninstalling (which wipes saved sessions). The
+// keystore is debug-grade with a well-known password — committing it
+// is fine for a sideloaded personal app.
+function copyKeystore() {
+  const src = path.join(ROOT, 'android-keystore', 'claude-sessions.keystore');
+  if (!fs.existsSync(src)) {
+    console.warn('[android-init] no committed keystore; build will use a per-run debug key (updates may require uninstall)');
+    return;
+  }
+  copyIfChanged(src, path.join(ANDROID, 'app', 'claude-sessions.keystore'));
 }
 
 // JNI C sources for the PTY library (Phase 1 of the local-shell
@@ -279,6 +296,29 @@ function patchAppGradle() {
   // doesn't fail the build.
   if (!g.match(/buildTypes\s*\{[^}]*debug\s*\{[^}]*minifyEnabled\s*false/)) {
     g = g.replace(/buildTypes\s*\{/, (m) => `${m}\n        debug { minifyEnabled false }`);
+  }
+
+  // Stable signing key. Each CI runner otherwise auto-generates its
+  // own ~/.android/debug.keystore, so every build is signed with a
+  // DIFFERENT key — Android then refuses to install the new APK over
+  // the old one ("signatures do not match") and the user has to
+  // uninstall first, wiping all saved sessions. We commit one fixed
+  // keystore (debug-grade, well-known password) and point the debug
+  // signingConfig at it so every build shares a signature → updates
+  // install over the top and preserve data.
+  const SIGNING_MARKER = '// claude-sessions: stable signing';
+  if (!g.includes(SIGNING_MARKER)) {
+    g = g.replace(/android\s*\{/, (m) => `${m}
+    ${SIGNING_MARKER}
+    signingConfigs {
+        debug {
+            storeFile file('claude-sessions.keystore')
+            storePassword 'android'
+            keyAlias 'claudesessions'
+            keyPassword 'android'
+        }
+    }
+`);
   }
 
   // Native PTY library (jni/pty.c → libclaudesessions_pty.so) for
