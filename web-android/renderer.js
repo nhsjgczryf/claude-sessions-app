@@ -1681,16 +1681,24 @@ function keybarBytesFor(action) {
     if (action === 'mod:ctrl') { setCtrlArmed(!ctrlArmed); return; }
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab || !tab.alive) return;
+    const C = window.Compose;
+    const hasText = C && C.hasContent();
 
-    // Backspace is special: text lives in the compose box, so when it
-    // has content we delete a char there (reliable, doesn't depend on
-    // the IME's flaky delete). Only when the box is empty do we send a
-    // real backspace byte to the PTY (for TUIs doing their own line
-    // editing). This is the "reliable delete key" the user asked for.
-    if (action === 'key:Backspace') {
-      if (composeBackspace()) return;
-      bridgeFor(tab).write(tab.id, '\x7f').catch(() => {});
-      return;
+    // Editing keys operate on the COMPOSE BOX (where the user's text
+    // lives) when it has content, and only fall through to the PTY
+    // when the box is empty — e.g. arrows for navigating a claude
+    // menu. ⏎ always inserts a newline in the box (the "Shift+Enter"
+    // people look for). ⌫ deletes in the box or, when empty, sends a
+    // real backspace byte for TUIs.
+    switch (action) {
+      case 'key:Newline':    if (C) { C.insert('\n'); return; } break;
+      case 'key:Backspace':  if (composeBackspace()) return; bridgeFor(tab).write(tab.id, '\x7f').catch(() => {}); return;
+      case 'key:ArrowLeft':  if (hasText) { C.moveChar(-1); return; } break;
+      case 'key:ArrowRight': if (hasText) { C.moveChar(1); return; } break;
+      case 'key:ArrowUp':    if (hasText) { C.moveLine(-1); return; } break;
+      case 'key:ArrowDown':  if (hasText) { C.moveLine(1); return; } break;
+      case 'key:Home':       if (hasText) { C.home(); return; } break;
+      case 'key:End':        if (hasText) { C.end(); return; } break;
     }
 
     let bytes = keybarBytesFor(action);
@@ -1698,14 +1706,9 @@ function keybarBytesFor(action) {
     if (action.startsWith('char:')) bytes = applyCtrlIfArmed(bytes);
     else if (ctrlArmed) setCtrlArmed(false);
     bridgeFor(tab).write(tab.id, bytes).catch(() => {});
-    // Don't call tab.term.focus() here. Focusing the hidden textarea
-    // triggers Android to (re)open the IME — even for navigation
-    // taps like PgUp/PgDn/arrows where the user has no intention to
-    // type. The button itself "blurs" the textarea on tap, which is
-    // a feature for navigation actions; if the user wants to type
-    // next they'll tap the terminal again. Char-injecting buttons
-    // (Tab, |, /, etc.) lose the soft keyboard too, which is a fair
-    // tradeoff for the rest of the row not flashing the IME.
+    // No focus() change here — the mousedown preventDefault above kept
+    // the compose box focused (keyboard state unchanged), which is the
+    // behavior we want for both editing and program-control keys.
   });
 })();
 
@@ -1832,6 +1835,19 @@ function updateKeybarVisibility() {
   }, 0));
 
   input.addEventListener('keydown', (e) => {
+    // Ctrl armed (tapped the keybar Ctrl): the next ASCII letter typed
+    // here becomes a control byte sent to the PTY (so "Ctrl then c" =
+    // ^C, "Ctrl then l" = clear, etc.) instead of being inserted into
+    // the box. This is what makes arbitrary Ctrl-combos work.
+    if (ctrlArmed && !e.isComposing && e.key && e.key.length === 1) {
+      const c = e.key.toUpperCase().charCodeAt(0);
+      if (c >= 0x40 && c <= 0x7E) {
+        e.preventDefault();
+        send(String.fromCharCode(c & 0x1f));
+        setCtrlArmed(false);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (e.isComposing) { pendingEnter = true; return; }
@@ -1851,14 +1867,66 @@ function updateKeybarVisibility() {
     });
   }
 
-  // Reliable backspace for the compose box, used by the keybar ⌫ key
-  // (the soft-keyboard's own delete is flaky on some Android IMEs).
-  // Deletes the selection if any, else the char before the caret.
-  // Returns true if it acted (box had content), false if empty.
+  // Compose-box editing API used by the keybar. Text the user types
+  // lives in this box (claude's own input is empty — we submit whole
+  // messages), so arrows / Home / End / newline / backspace must edit
+  // THE BOX, not get sent to the PTY. The keybar only forwards them to
+  // the program when the box is empty (e.g. navigating a claude menu).
+  function caret() {
+    let s = input.selectionStart, e = input.selectionEnd;
+    if (typeof s !== 'number') s = e = input.value.length;
+    return [s, e];
+  }
+  window.Compose = {
+    hasContent: () => !!input.value,
+    moveChar(delta) {
+      let [s] = caret();
+      s = Math.max(0, Math.min(input.value.length, s + delta));
+      try { input.setSelectionRange(s, s); } catch (_) {}
+    },
+    moveLine(delta) {
+      const v = input.value;
+      let [p] = caret();
+      const lineStart = v.lastIndexOf('\n', p - 1) + 1;
+      const col = p - lineStart;
+      if (delta < 0) {
+        if (lineStart === 0) { this.moveChar(-p); return; }   // first line → go to very start
+        const prevStart = v.lastIndexOf('\n', lineStart - 2) + 1;
+        const prevLen = lineStart - 1 - prevStart;
+        const np = prevStart + Math.min(col, prevLen);
+        try { input.setSelectionRange(np, np); } catch (_) {}
+      } else {
+        let lineEnd = v.indexOf('\n', p);
+        if (lineEnd < 0) { try { input.setSelectionRange(v.length, v.length); } catch (_) {} return; }
+        const nextStart = lineEnd + 1;
+        let nextEnd = v.indexOf('\n', nextStart);
+        if (nextEnd < 0) nextEnd = v.length;
+        const np = nextStart + Math.min(col, nextEnd - nextStart);
+        try { input.setSelectionRange(np, np); } catch (_) {}
+      }
+    },
+    home() {
+      const v = input.value; const [p] = caret();
+      const ls = v.lastIndexOf('\n', p - 1) + 1;
+      try { input.setSelectionRange(ls, ls); } catch (_) {}
+    },
+    end() {
+      const v = input.value; const [p] = caret();
+      let le = v.indexOf('\n', p); if (le < 0) le = v.length;
+      try { input.setSelectionRange(le, le); } catch (_) {}
+    },
+    insert(text) {
+      const [s, e] = caret();
+      input.value = input.value.slice(0, s) + text + input.value.slice(e);
+      const np = s + text.length;
+      try { input.setSelectionRange(np, np); } catch (_) {}
+      autoGrow();
+    },
+    backspace() { return window.__composeBackspace(); },
+  };
   window.__composeBackspace = function () {
     if (!input.value) return false;
-    let s = input.selectionStart, e = input.selectionEnd;
-    if (typeof s !== 'number') { s = e = input.value.length; }
+    let [s, e] = caret();
     if (s === e) {
       if (s === 0) return false;
       input.value = input.value.slice(0, s - 1) + input.value.slice(s);
@@ -1866,8 +1934,6 @@ function updateKeybarVisibility() {
     } else {
       input.value = input.value.slice(0, s) + input.value.slice(e);
     }
-    // Set the caret for when the box next has focus; don't force
-    // focus() here — that would pop the soft keyboard on a plain ⌫ tap.
     try { input.setSelectionRange(s, s); } catch (_) {}
     autoGrow();
     return true;
@@ -1875,7 +1941,7 @@ function updateKeybarVisibility() {
 })();
 
 function composeBackspace() {
-  return typeof window.__composeBackspace === 'function' && window.__composeBackspace();
+  return window.Compose ? window.Compose.backspace() : false;
 }
 
 // ============================================================================
