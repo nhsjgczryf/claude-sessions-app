@@ -80,11 +80,28 @@ jobs:
           path: android/app/src/main/assets/proot-arm64
           key: proot-arm64-v5.4.0-alpine3.20-v2
 
+      - name: Cache Alpine rootfs
+        # The rootfs only changes when build-alpine-rootfs.sh changes
+        # (package list, trimming, etc.). UI-only commits to
+        # web-android/* don't affect it, so cache it keyed on the
+        # script's hash. On a hit the build step below skips the
+        # ~5-10 min QEMU rootfs build entirely — turning a UI-only CI
+        # run from ~15 min into ~3-4 min.
+        id: cache-rootfs
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/src/main/assets/alpine-rootfs.tar.zst
+            android/app/src/main/assets/rootfs-version.txt
+          key: rootfs-alpine3.20-${{ hashFiles('scripts/build-alpine-rootfs.sh') }}
+
       - name: Build Alpine rootfs + PRoot (bundled Linux env)
         # Produces android/app/src/main/assets/{proot-arm64,
         # alpine-rootfs.tar.zst,rootfs-version.txt} which then get
-        # packaged into the APK by gradle in the next step. End-to-end
-        # ~10-15 min on a cold cache (~3-5 min when proot is cached).
+        # packaged into the APK by gradle in the next step. The script
+        # skips whichever artifacts are already present (restored from
+        # the caches above), so a fully-cached run is a near-instant
+        # no-op and a cold run is ~10-15 min.
         run: bash scripts/build-alpine-rootfs.sh
         env:
           PROOT_REF: v5.4.0

@@ -128,6 +128,10 @@ fi
 
 echo "==> Building Alpine rootfs (this is the slow step under QEMU; 5-15 min)"
 
+if [[ -f "$OUT/alpine-rootfs.tar.zst" ]]; then
+  echo "==> alpine-rootfs.tar.zst already present (cache hit); skipping rootfs build"
+else
+
 docker buildx build --platform=linux/arm64 \
   --output "type=tar,dest=/tmp/rootfs.tar" \
   --build-arg NPM_INSTALL="$NPM_INSTALL" \
@@ -235,12 +239,13 @@ echo "==> Recompressing tar with zstd -19"
 # zstd recompresses it to the format the APK plugin expects to find.
 zstd -19 --rm -f -o "$OUT/alpine-rootfs.tar.zst" /tmp/rootfs.tar
 
-# ---------------------------------------------------------------------
-# 3. Version marker for the APK
-# ---------------------------------------------------------------------
-# The plugin reads this at runtime to decide whether the rootfs on
-# disk is current. Bumping it triggers a re-extraction on next launch.
+# Version marker for the APK. The plugin reads this at runtime to
+# decide whether the rootfs on disk is current; bumping it triggers a
+# re-extraction. Only written on a fresh build (inside this else) so a
+# cache hit keeps the marker that matches the cached tarball.
 date -u +'%Y%m%d-%H%M%S' > "$OUT/rootfs-version.txt"
+
+fi   # end "rootfs not cached"
 
 echo
 echo "==> Done. Assets in $OUT:"
