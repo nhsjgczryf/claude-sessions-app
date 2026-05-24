@@ -1,27 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-   Overrides Capacitor's bundled bridge_layout_main.xml.
+   Overrides Capacitor 7's bundled capacitor_bridge_layout_main.xml
+   (BridgeActivity does setContentView(R.layout.capacitor_bridge_layout_main)).
+   The bundled version is just a CoordinatorLayout wrapping a
+   com.getcapacitor.CapacitorWebView@+id/webview. We replace it with a
+   vertical LinearLayout: the same CapacitorWebView (weight 1) on top,
+   and a NATIVE compose bar (EditText + ↵ Send) docked below.
 
-   Two jobs:
-   1. Make the bridge WebView our ClaudeSessionsWebView subclass
-      (kept from before — its onCreateInputConnection wraps IME input).
-   2. Dock a NATIVE compose bar (EditText + Send) below the WebView.
-      Android WebView has an unfixable Chromium bug where the caret
-      jumps to the end when you edit CJK / non-Latin text in the
-      middle of an <input>/<textarea> (see TerminalInputConnection.kt
-      and the Capacitor forum thread). A native EditText uses
-      Android's own text editing and does NOT have that bug, so we
-      type into it and bridge the text to the WebView via
-      ComposeInputPlugin.
+   Why native: Android WebView has an unfixable Chromium bug where
+   editing CJK / non-Latin text in the middle of a web <input>/
+   <textarea> snaps the caret to the end. A native EditText uses
+   Android's own text editing and doesn't have it. ComposeInputPlugin
+   shows/hides this bar and bridges its text to the WebView.
 
-   The root is a vertical LinearLayout: WebView takes all remaining
-   space (height=0 + weight=1), the compose bar wraps at the bottom.
    With windowSoftInputMode=adjustResize the soft keyboard pushes the
-   whole layout up, so the compose bar always sits right above the
-   keyboard — no manual pixel positioning needed. The bar starts
-   GONE; ComposeInputPlugin shows it when a terminal tab is active.
+   layout up, so the bar sits above the keyboard — no pixel math. Bar
+   starts GONE; the plugin shows it when a terminal tab is active.
 
-   Capacitor finds the WebView via @id/webview regardless of nesting.
+   IMPORTANT: the WebView MUST be com.getcapacitor.CapacitorWebView
+   (Capacitor's Bridge casts findViewById(R.id.webview) to it) and the
+   file MUST be named capacitor_bridge_layout_main.xml — the old
+   bridge_layout_main.xml name is from pre-7 Capacitor and is ignored.
 -->
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -30,7 +29,7 @@
     android:orientation="vertical"
     android:background="#1e1e2e">
 
-    <app.claudesessions.android.ClaudeSessionsWebView
+    <com.getcapacitor.CapacitorWebView
         android:id="@+id/webview"
         android:layout_width="match_parent"
         android:layout_height="0dp"
