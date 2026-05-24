@@ -62,29 +62,33 @@
                 placeholder="Tap to type · Enter sends · Shift+Enter 换行 · 中文/英文"></textarea>
       <button id="mobile-input-send" type="button" title="Send (Enter)">↵</button>
     </div>
-    <!-- Only keys the Android soft keyboard either can't reach or
-         hides under modifier pages. Punctuation (|, /, ~, etc.) is
-         on the keyboard's "123" / symbols page already so it
-         doesn't earn its spot here. -->
-    <!-- Keys oriented around claude-code on a phone: Esc (interrupt),
-         Shift+Tab (cycle auto-accept / plan mode), Tab (accept), the
-         arrows (history + menu nav), PgUp/PgDn (scroll output / tmux),
-         ^C (cancel). Ctrl is a one-shot modifier for everything else.
-         Plain punctuation lives on the keyboard's symbols page. -->
+    <!-- keybar = controls the PROGRAM running in the terminal above
+         (claude / shell), NEVER the bottom compose box. All text input
+         (中文 + English, long messages) goes through the bottom box; the
+         terminal is read-only output you scroll (finger swipe) and
+         select-to-copy (long-press).
+
+         Grouped: interrupt/mode (Esc · ⇧⇥ · Tab) · navigation (↑↓←→ —
+         history recall, menu nav, and moving the caret in a recalled
+         line) · line-edit (⌫ backspace · Clr = Ctrl+U wipes the whole
+         current line) · cancel/modifier (^C · Ctrl one-shot).
+         Esc interrupts claude's current turn (double-tap = rewind);
+         ^C cancels / clears input. No ⏎ (newline = the box keyboard's
+         return key) and no PgUp/PgDn (scroll = swipe). Ctrl arms a
+         one-shot: the next char typed in the box is sent as Ctrl+<char>
+         (Ctrl+R, Ctrl+L, Ctrl+D, …). -->
     <div id="keybar" class="hidden" aria-hidden="true">
-      <button type="button" data-keybar="key:Escape" title="Esc (interrupt)">Esc</button>
-      <button type="button" data-keybar="key:ShiftTab" title="Shift+Tab (cycle mode)">⇧⇥</button>
-      <button type="button" data-keybar="key:Tab" title="Tab (accept)">Tab</button>
-      <button type="button" data-keybar="key:ArrowUp" title="Up / history">↑</button>
-      <button type="button" data-keybar="key:ArrowDown">↓</button>
-      <button type="button" data-keybar="key:ArrowLeft" title="Left (move caret in box)">←</button>
-      <button type="button" data-keybar="key:ArrowRight" title="Right (move caret in box)">→</button>
-      <button type="button" data-keybar="key:Newline" title="Insert newline in the message (Shift+Enter)">⏎</button>
-      <button type="button" data-keybar="key:Backspace" title="Backspace / Delete">⌫</button>
-      <button type="button" data-keybar="key:PageUp" title="Page Up (scroll output)">PgUp</button>
-      <button type="button" data-keybar="key:PageDown" title="Page Down">PgDn</button>
-      <button type="button" data-keybar="ctrl:c" title="Ctrl+C (cancel)">^C</button>
-      <button type="button" data-keybar="mod:ctrl" title="Ctrl (one-shot)">Ctrl</button>
+      <button type="button" data-keybar="key:Escape" title="Esc — interrupt claude (double-tap = rewind)">Esc</button>
+      <button type="button" data-keybar="key:ShiftTab" title="Shift+Tab — cycle mode (plan / auto-accept)">⇧⇥</button>
+      <button type="button" data-keybar="key:Tab" title="Tab — accept / complete">Tab</button>
+      <button type="button" data-keybar="key:ArrowUp" title="Up — history / menu up">↑</button>
+      <button type="button" data-keybar="key:ArrowDown" title="Down — history / menu down">↓</button>
+      <button type="button" data-keybar="key:ArrowLeft" title="Left — move caret in the program's line">←</button>
+      <button type="button" data-keybar="key:ArrowRight" title="Right — move caret in the program's line">→</button>
+      <button type="button" data-keybar="key:Backspace" title="Backspace — delete a char in the program's line">⌫</button>
+      <button type="button" data-keybar="ctrl:u" title="Clr — wipe the whole current line (Ctrl+U)">Clr</button>
+      <button type="button" data-keybar="ctrl:c" title="Ctrl+C — cancel / interrupt">^C</button>
+      <button type="button" data-keybar="mod:ctrl" title="Ctrl — one-shot: next typed char becomes Ctrl+char">Ctrl</button>
     </div>
   </div>
 

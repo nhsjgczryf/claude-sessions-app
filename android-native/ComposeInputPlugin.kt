@@ -57,6 +57,10 @@ class ComposeInputPlugin : Plugin() {
         val e = edit ?: return
         val b = sendBtn ?: return
         b.setOnClickListener { submitCurrent() }
+        // Long-press Send = wipe the whole box. The keybar's Clr does
+        // this for the program's line (Ctrl+U); this is the equivalent
+        // "delete everything I typed" for the compose box itself.
+        b.setOnLongClickListener { e.setText(""); true }
 
         // Make the EditText reliably focus + raise the keyboard on tap.
         // With a WebView as the primary view, a plain EditText tap

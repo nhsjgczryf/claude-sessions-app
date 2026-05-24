@@ -1082,3 +1082,51 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 .live-session-sub { font-size: 11px; color: var(--fg-dim); margin-top: 2px; }
 .live-session-btns { flex: 0 0 auto; display: flex; gap: 6px; }
+
+/* =========================================== Selection toolbar
+ * Floating action bar shown while the terminal is in touch-selection
+ * mode (long-press → drag to select). Sits near the top so it doesn't
+ * collide with the keybar / compose box at the bottom. */
+#sel-toolbar {
+  position: fixed;
+  top: calc(42px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 16px);
+  flex-wrap: wrap;
+  justify-content: center;
+  padding: 6px 8px;
+  background: var(--bg2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 400;
+  -webkit-tap-highlight-color: transparent;
+}
+#sel-toolbar.hidden { display: none; }
+#sel-toolbar .sel-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-right: 2px;
+  user-select: none;
+}
+#sel-toolbar button {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--input-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  user-select: none;
+}
+#sel-toolbar button:active { background: var(--bg-selected); }
+#sel-toolbar button[data-sel="copy"] {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  font-weight: 600;
+}

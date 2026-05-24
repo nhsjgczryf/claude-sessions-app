@@ -772,9 +772,8 @@ async function launchSession(sessionId, opts) {
     term, fitAddon, container, alive: false,
   };
   tabs.push(tab);
-  attachTouchScroll(tab);
+  attachTerminalTouch(tab);
   attachSoftKeyboardFix(tab);
-  attachTerminalLongPress(tab);
 
   term.onData((data) => {
     if (!tab.alive) return;
@@ -1039,6 +1038,7 @@ function promptReconnect(tab) {
 }
 
 function switchToTab(tabId) {
+  exitSelectMode();
   activeTabId = tabId;
   for (const t of tabs) t.container.classList.toggle('active', t.id === tabId);
   const tab = tabs.find((t) => t.id === tabId);
@@ -1059,6 +1059,7 @@ function switchToTab(tabId) {
 function closeTab(tabId, opts) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx < 0) return;
+  if (selectingTabId === tabId) exitSelectMode();
   const tab = tabs[idx];
   if (!(opts && opts.skipSshClose)) {
     bridgeFor(tab).close(tabId).catch(() => {});
@@ -1359,62 +1360,79 @@ function readViewportText(term) {
   } catch (_) { return ''; }
 }
 
-// Long-press menu on the terminal: reliable copy/paste actions that
-// don't depend on the fiddly touch text-selection handles.
-function showTerminalMenu(x, y, tab) {
-  const menu = $('#context-menu');
-  menu.innerHTML = '';
-  const term = tab.term;
-  const items = [];
-  if (term.hasSelection()) {
-    items.push({ label: 'Copy selection', action: () => {
-      Clip.write(term.getSelection()); term.clearSelection(); notify('Copied', 'success');
-    }});
-  }
-  items.push({ label: 'Copy screen', action: () => {
-    const text = readViewportText(term);
-    if (text) { Clip.write(text); notify('Copied screen', 'success'); }
-  }});
-  items.push({ label: 'Paste', action: () => {
-    Clip.read().then((t) => { if (t) bracketedPaste(tab.id, t); });
-  }});
-  items.push({ label: 'Select all', action: () => { try { term.selectAll(); } catch (_) {} }});
-  for (const it of items) {
-    const mi = document.createElement('div');
-    mi.className = 'menu-item';
-    mi.textContent = it.label;
-    mi.addEventListener('click', () => { menu.classList.add('hidden'); it.action(); });
-    menu.appendChild(mi);
-  }
-  // Clamp to viewport so the menu doesn't overflow off-screen.
-  const vw = window.innerWidth, vh = window.innerHeight;
-  menu.style.left = Math.min(x, vw - 160) + 'px';
-  menu.style.top = Math.min(y, vh - 180) + 'px';
-  menu.classList.remove('hidden');
+// Touch text-selection / copy. The terminal is read-only on touch (all
+// typing goes through the bottom compose box), which frees the touch
+// surface for selecting output. Long-press the terminal to enter SELECT
+// MODE: an anchor is dropped where you pressed, dragging extends the
+// selection, and a floating toolbar offers 全选 / 整屏 / 粘贴 / 复制 /
+// 取消. xterm uses the DOM renderer (a <div> grid), so we map touch
+// coordinates to buffer cells off a sample row's measured size and drive
+// xterm's own selection API — the system text-selection handles can't
+// reach xterm's rendered divs.
+let selectingTabId = null;
+
+function selToolbarEl() {
+  let el = document.getElementById('sel-toolbar');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'sel-toolbar';
+  el.className = 'hidden';
+  el.innerHTML =
+    '<span class="sel-hint">拖动选择</span>' +
+    '<button type="button" data-sel="all">全选</button>' +
+    '<button type="button" data-sel="screen">整屏</button>' +
+    '<button type="button" data-sel="paste">粘贴</button>' +
+    '<button type="button" data-sel="copy">复制</button>' +
+    '<button type="button" data-sel="cancel">取消</button>';
+  document.body.appendChild(el);
+  // preventDefault on mousedown so a toolbar tap doesn't fire a synthetic
+  // terminal tap underneath or move focus off the compose box.
+  el.addEventListener('mousedown', (e) => e.preventDefault());
+  el.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-sel]');
+    if (!b) return;
+    const tab = tabs.find((t) => t.id === selectingTabId);
+    if (!tab) { exitSelectMode(); return; }
+    switch (b.dataset.sel) {
+      case 'all': try { tab.term.selectAll(); } catch (_) {} return;
+      case 'screen': {
+        const txt = readViewportText(tab.term);
+        if (txt) { Clip.write(txt); notify('已复制整屏', 'success'); }
+        exitSelectMode();
+        return;
+      }
+      case 'paste':
+        Clip.read().then((t) => { if (t) bracketedPaste(tab.id, t); });
+        exitSelectMode();
+        return;
+      case 'copy': {
+        const sel = tab.term.getSelection();
+        if (sel) { Clip.write(sel); notify('已复制', 'success'); }
+        else notify('未选中文本', 'info');
+        exitSelectMode();
+        return;
+      }
+      case 'cancel': exitSelectMode(); return;
+    }
+  });
+  return el;
 }
 
-function attachTerminalLongPress(tab) {
-  if (!isTouchDevice()) return;
-  const el = tab.container;
-  let timer = null, startX = 0, startY = 0;
-  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
-  el.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { clear(); return; }
-    startX = e.touches[0].clientX;
-    startY = e.touches[0].clientY;
-    clear();
-    timer = setTimeout(() => {
-      timer = null;
-      showTerminalMenu(startX, startY, tab);
-    }, 500);
-  }, { passive: true });
-  el.addEventListener('touchmove', (e) => {
-    if (!timer) return;
-    const t = e.touches[0];
-    if (Math.abs(t.clientX - startX) > 10 || Math.abs(t.clientY - startY) > 10) clear();
-  }, { passive: true });
-  el.addEventListener('touchend', clear, { passive: true });
-  el.addEventListener('touchcancel', clear, { passive: true });
+function enterSelectMode(tab) {
+  selectingTabId = tab.id;
+  tab._selecting = true;
+  selToolbarEl().classList.remove('hidden');
+}
+
+function exitSelectMode() {
+  const tab = tabs.find((t) => t.id === selectingTabId);
+  if (tab) {
+    tab._selecting = false;
+    try { tab.term.clearSelection(); } catch (_) {}
+  }
+  selectingTabId = null;
+  const el = document.getElementById('sel-toolbar');
+  if (el) el.classList.add('hidden');
 }
 
 // ============================================================================
@@ -1584,22 +1602,86 @@ function attachSoftKeyboardFix(tab) {
   };
 }
 
-function attachTouchScroll(tab) {
+// Combined terminal touch handler: swipe = scroll (or SGR wheel events
+// into a TUI's alt-screen), long-press = enter selection mode. While
+// selecting, drags extend the selection instead of scrolling. The
+// terminal never receives typed input on touch, so touch is free for
+// scroll + select.
+function attachTerminalTouch(tab) {
   if (!isTouchDevice()) return;
   const container = tab.container;
+  const term = tab.term;
   let lastY = null, totalDy = 0, pxPerLine = 17, scrolling = false;
+  let longTimer = null, startX = 0, startY = 0, moved = false;
+  let anchor = null;
   const DEADZONE = 10;
+
+  const clearLong = () => { if (longTimer) { clearTimeout(longTimer); longTimer = null; } };
+
+  function rowMetrics() {
+    const rowEl = container.querySelector('.xterm-rows > div');
+    const r = rowEl && rowEl.getBoundingClientRect();
+    const h = (r && r.height) || pxPerLine;
+    const w = (r && r.width && term.cols) ? r.width / term.cols
+      : (container.clientWidth / Math.max(1, term.cols));
+    return { h, w };
+  }
+  function cellFromPoint(clientX, clientY) {
+    const screen = container.querySelector('.xterm-screen') ||
+      container.querySelector('.xterm-rows') || container;
+    const rect = screen.getBoundingClientRect();
+    const m = rowMetrics();
+    let col = Math.floor((clientX - rect.left) / (m.w || 1));
+    let row = Math.floor((clientY - rect.top) / (m.h || 1));
+    col = Math.max(0, Math.min(term.cols - 1, col));
+    row = Math.max(0, Math.min(term.rows - 1, row));
+    return { col, line: term.buffer.active.viewportY + row };
+  }
+  // Single-line drag → partial range; multi-line drag → whole lines
+  // (the predictable expectation when grabbing a block of output).
+  function applySel(a, b) {
+    let s = a, e = b;
+    if (e.line < s.line || (e.line === s.line && e.col < s.col)) { s = b; e = a; }
+    try {
+      if (s.line === e.line) term.select(s.col, s.line, (e.col - s.col) + 1);
+      else term.selectLines(s.line, e.line);
+    } catch (_) {}
+  }
+
   container.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { lastY = null; return; }
-    lastY = e.touches[0].clientY;
-    totalDy = 0; scrolling = false;
-    const row = container.querySelector('.xterm-rows > div');
-    const h = row && row.getBoundingClientRect().height;
-    if (h && h > 0) pxPerLine = h;
+    if (e.touches.length !== 1) { lastY = null; clearLong(); return; }
+    const t = e.touches[0];
+    startX = t.clientX; startY = t.clientY; moved = false;
+    if (tab._selecting) {
+      anchor = cellFromPoint(t.clientX, t.clientY);
+      applySel(anchor, anchor);
+      return;
+    }
+    lastY = t.clientY; totalDy = 0; scrolling = false;
+    const m = rowMetrics(); if (m.h > 0) pxPerLine = m.h;
+    clearLong();
+    longTimer = setTimeout(() => {
+      longTimer = null;
+      if (moved) return;
+      enterSelectMode(tab);
+      anchor = cellFromPoint(startX, startY);
+      applySel(anchor, anchor);
+    }, 500);
   }, { passive: true, capture: true });
+
   container.addEventListener('touchmove', (e) => {
-    if (lastY == null || e.touches.length !== 1) return;
-    const y = e.touches[0].clientY;
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - startX) > DEADZONE ||
+        Math.abs(t.clientY - startY) > DEADZONE) moved = true;
+
+    if (tab._selecting) {
+      if (anchor) { applySel(anchor, cellFromPoint(t.clientX, t.clientY)); e.preventDefault(); }
+      return;
+    }
+    if (moved) clearLong();
+    if (lastY == null) return;
+    const y = t.clientY;
     const dy = y - lastY;
     totalDy += dy;
     if (!scrolling && Math.abs(totalDy) < DEADZONE) return;
@@ -1615,19 +1697,19 @@ function attachTouchScroll(tab) {
     // `set -g mouse on` (and most TUIs with mouse support) honor as
     // scrollback navigation. Capped to ±3 events per touchmove so
     // a single swipe doesn't fly past the user's target.
-    const altScreen = tab.term.buffer && tab.term.buffer.active &&
-      tab.term.buffer.active.type === 'alternate';
+    const altScreen = term.buffer && term.buffer.active &&
+      term.buffer.active.type === 'alternate';
     if (altScreen && tab.alive) {
       const n = Math.min(3, Math.abs(lines));
       const code = lines < 0 ? 64 : 65;   // 64 = wheel up, 65 = wheel down
-      const seq = `\x1b[<${code};1;1M`.repeat(n);
-      bridgeFor(tab).write(tab.id, seq).catch(() => {});
+      bridgeFor(tab).write(tab.id, `\x1b[<${code};1;1M`.repeat(n)).catch(() => {});
     } else {
-      try { tab.term.scrollLines(lines); } catch (_) {}
+      try { term.scrollLines(lines); } catch (_) {}
     }
     e.preventDefault();
   }, { passive: false, capture: true });
-  const reset = () => { lastY = null; totalDy = 0; scrolling = false; };
+
+  const reset = () => { lastY = null; totalDy = 0; scrolling = false; clearLong(); };
   container.addEventListener('touchend', reset, { passive: true, capture: true });
   container.addEventListener('touchcancel', reset, { passive: true, capture: true });
 }
@@ -1664,6 +1746,8 @@ function keybarBytesFor(action) {
       case 'PageUp': return '\x1b[5~';
       case 'PageDown': return '\x1b[6~';
       case 'ShiftTab': return '\x1b[Z';   // CSI Z = back-tab; claude cycles modes
+      case 'Backspace': return '\x7f';    // DEL — delete a char in the program's line
+      case 'Delete': return '\x1b[3~';
     }
   } else if (kind === 'ctrl' && val && val.length === 1) {
     const c = val.toUpperCase().charCodeAt(0);
@@ -1695,11 +1779,12 @@ function keybarBytesFor(action) {
     if (!tab || !tab.alive) return;
 
     if (usingNativeCompose) {
-      // Native EditText owns text editing (caret moves by tapping it,
-      // backspace is native). The keybar's job here is just ⏎ (insert
-      // a newline in the message) and PTY control keys; arrows / ⌫ /
-      // Home / End go straight to the PTY (claude menu nav, TUIs).
-      if (action === 'key:Newline') { ComposeInputBridge.insertNewline().catch(() => {}); return; }
+      // keybar controls the PROGRAM in the terminal, never this box.
+      // The bottom EditText owns all text editing (native caret +
+      // backspace; newline is its keyboard's return key). So every
+      // keybar key just streams bytes to the PTY: arrows (history /
+      // menu nav / editing a recalled line), ⌫ (backspace), Clr
+      // (Ctrl+U), Esc, Tab, ^C, and Ctrl-armed combos.
       let b = keybarBytesFor(action);
       if (b == null) return;
       if (action.startsWith('char:')) b = applyCtrlIfArmed(b);
