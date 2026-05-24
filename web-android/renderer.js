@@ -28,7 +28,10 @@ const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11A
 // top so updateKeybarVisibility / the keybar handler can read it
 // without a temporal-dead-zone hazard. compose-input-bridge.js loads
 // before renderer.js, so window.ComposeInputBridge already exists.
-const usingNativeCompose =
+// `let` (not const): a startup readiness probe flips it back to false
+// if the native views didn't wire up, so we fall back to the in-page
+// box instead of leaving the user with no input at all.
+let usingNativeCompose =
   !!(window.ComposeInputBridge && window.ComposeInputBridge.available);
 
 // Clipboard helper. navigator.clipboard.* on Android WebView is
@@ -1986,6 +1989,16 @@ if (usingNativeCompose) {
   ComposeInputBridge.onSubmit((ev) => {
     submitTextToActiveTab((ev && ev.text) || '');
   });
+  // Safety net: if the native views never wired up (layout override
+  // didn't take), fall back to the in-page compose box so the user
+  // isn't left with no way to type.
+  ComposeInputBridge.isReady().then((r) => {
+    if (!r || !r.ready) {
+      console.warn('[compose] native bar not ready; falling back to in-page box');
+      usingNativeCompose = false;
+      updateKeybarVisibility();
+    }
+  }).catch(() => {});
 }
 
 // ============================================================================

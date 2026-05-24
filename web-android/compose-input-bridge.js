@@ -40,6 +40,13 @@
       if (!PLUGIN) return;
       return PLUGIN.focus();
     },
+    // Resolves { ready } — false if the native views weren't found
+    // (layout override didn't apply), so renderer can fall back to
+    // the in-page compose box.
+    async isReady() {
+      if (!PLUGIN) return { ready: false };
+      try { return await PLUGIN.isReady(); } catch (_) { return { ready: false }; }
+    },
 
     // cb receives { text } when the native Send button is tapped.
     onSubmit(cb) { submitListeners.add(cb); return () => submitListeners.delete(cb); },

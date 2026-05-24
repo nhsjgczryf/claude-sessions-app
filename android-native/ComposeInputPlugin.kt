@@ -47,6 +47,8 @@ class ComposeInputPlugin : Plugin() {
         bar = act.findViewById(res.getIdentifier("compose_bar", "id", pkg))
         edit = act.findViewById(res.getIdentifier("compose_input", "id", pkg))
         sendBtn = act.findViewById(res.getIdentifier("compose_send", "id", pkg))
+        android.util.Log.i("ClaudeCompose",
+            "load: bar=${bar != null} edit=${edit != null} send=${sendBtn != null}")
         wire()
     }
 
@@ -55,7 +57,35 @@ class ComposeInputPlugin : Plugin() {
         val e = edit ?: return
         val b = sendBtn ?: return
         b.setOnClickListener { submitCurrent() }
+
+        // Make the EditText reliably focus + raise the keyboard on tap.
+        // With a WebView as the primary view, a plain EditText tap
+        // sometimes doesn't pop the IME on its own, so we force it.
+        e.isFocusable = true
+        e.isFocusableInTouchMode = true
+        e.setOnClickListener { showKeyboardOn(e) }
+        e.setOnFocusChangeListener { _, hasFocus -> if (hasFocus) showKeyboardOn(e) }
+
+        // Keep the bar above the gesture-nav bar when the keyboard is
+        // down (adjustResize handles the keyboard-up case).
+        bar?.let { barView ->
+            androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(barView) { v, insets ->
+                val nav = insets.getInsets(
+                    androidx.core.view.WindowInsetsCompat.Type.navigationBars() or
+                        androidx.core.view.WindowInsetsCompat.Type.ime()
+                ).bottom
+                v.setPadding(v.paddingLeft, v.paddingTop, v.paddingRight, nav)
+                insets
+            }
+        }
         wired = true
+    }
+
+    private fun showKeyboardOn(v: View) {
+        v.requestFocus()
+        val imm = activity?.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+            as? android.view.inputmethod.InputMethodManager
+        imm?.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
     }
 
     private fun submitCurrent() {
@@ -70,9 +100,21 @@ class ComposeInputPlugin : Plugin() {
     fun setActive(call: PluginCall) {
         val show = call.getBoolean("active", false) == true
         activity?.runOnUiThread {
+            // Re-resolve views lazily in case load() ran before the
+            // content view was fully inflated.
+            if (bar == null || edit == null) load()
             bar?.visibility = if (show) View.VISIBLE else View.GONE
+            android.util.Log.i("ClaudeCompose", "setActive($show) bar=${bar != null}")
         }
         call.resolve()
+    }
+
+    // JS can query whether the native bar actually wired up; if not
+    // (e.g. the layout override didn't apply), it falls back to the
+    // in-page compose box.
+    @PluginMethod
+    fun isReady(call: PluginCall) {
+        call.resolve(JSObject().apply { put("ready", bar != null && edit != null) })
     }
 
     @PluginMethod
