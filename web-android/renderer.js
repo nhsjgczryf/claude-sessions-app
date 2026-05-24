@@ -1682,7 +1682,7 @@ function keybarBytesFor(action) {
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab || !tab.alive) return;
     const C = window.Compose;
-    const hasText = C && C.hasContent();
+    const hasText = C && C.hasContent() && !C.composing();
 
     // Editing keys operate on the COMPOSE BOX (where the user's text
     // lives) when it has content, and only fall through to the PTY
@@ -1781,25 +1781,19 @@ function updateKeybarVisibility() {
   // The box is a multi-line auto-growing textarea so a long prompt is
   // fully visible (wraps) instead of scrolling off a single-line
   // field — that was the "can't see what I typed" complaint.
-  const MAX_PX = 152;   // ~6 lines; matches the CSS max-height
+  // Native-textarea policy: we do NOT touch the textarea's value,
+  // height, or selection while the user types. Every previous attempt
+  // (JS autoGrow toggling height, reconstructing the IME commit,
+  // restoring selection) ended up desyncing Android WebView's IME
+  // composition buffer — which is what broke mid-text Chinese
+  // insertion and made backspace flaky. Auto-grow is now pure CSS
+  // (field-sizing: content). The only thing we track is a `composing`
+  // flag so the keybar's box-editing helpers don't poke the textarea
+  // mid-composition.
   let composing = false;
-  // Toggling height to 'auto' to measure scrollHeight forces a reflow
-  // that, on Android WebView, snaps the caret to the END of the
-  // textarea. That's the "insert Chinese in the middle → caret jumps
-  // to the end" bug. We save the caret before the reflow and restore
-  // it after — but NOT while an IME composition is active, because
-  // setSelectionRange would break the composition region. During
-  // composition we skip the resize entirely and catch up on
-  // compositionend.
-  function autoGrow() {
-    if (composing) return;
-    const s = input.selectionStart;
-    const e = input.selectionEnd;
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, MAX_PX) + 'px';
-    try { input.setSelectionRange(s, e); } catch (_) {}
-  }
-  function clearBox() { input.value = ''; input.style.height = 'auto'; }
+  let pendingEnter = false;
+
+  function clearBox() { input.value = ''; }
 
   // Send the composed text, then a carriage return so the shell / TUI
   // executes it. Multi-line content is wrapped in bracketed paste so
@@ -1818,53 +1812,15 @@ function updateKeybarVisibility() {
     clearBox();
   }
 
-  // Capture value + caret when an IME composition begins, and a flag
-  // to swallow the trailing input event after we override the commit.
-  let preComposeValue = '';
-  let preComposeStart = 0;
-  let justCommitted = false;
-
-  input.addEventListener('input', (e) => {
-    if (composing) return;                 // mid-composition: ignore
-    if (justCommitted) { justCommitted = false; return; }  // handled in compositionend
-    autoGrow();
-  });
-
-  input.addEventListener('compositionstart', () => {
-    composing = true;
-    preComposeValue = input.value;
-    let s = input.selectionStart;
-    if (typeof s !== 'number') s = input.value.length;
-    preComposeStart = Math.max(0, Math.min(input.value.length, s));
-  });
-
-  // Enter submits; Shift+Enter inserts a newline. Enter pressed WHILE
-  // composing (Gboard has the word underlined) fires keydown with
-  // isComposing=true and the IME swallows it to commit; we defer the
-  // submit to compositionend so "/clear" + Enter still executes.
-  let pendingEnter = false;
-
-  // On commit, DON'T trust the WebView's own insertion: Android
-  // WebView mis-places IME-composed text when the caret is in the
-  // middle of a textarea (it lands at the end). We reconstruct the
-  // insertion deterministically from the value + caret captured at
-  // compositionstart, so 中文 inserts exactly where the caret was —
-  // matching what already worked for plain (non-IME) English.
-  input.addEventListener('compositionend', (e) => {
+  input.addEventListener('compositionstart', () => { composing = true; });
+  // Enter submits; Shift+Enter inserts a newline (native). Enter
+  // pressed WHILE composing (Gboard has the word underlined) fires
+  // keydown with isComposing=true and the IME swallows it to commit;
+  // we defer the submit to compositionend so "/clear" + Enter still
+  // executes. We do NOT rewrite the value here — the textarea's own
+  // insertion is left untouched.
+  input.addEventListener('compositionend', () => {
     composing = false;
-    const text = e.data || '';
-    const start = Math.min(preComposeStart, preComposeValue.length);
-    const before = preComposeValue.slice(0, start);
-    const after = preComposeValue.slice(start);
-    input.value = before + text + after;
-    const np = start + text.length;
-    justCommitted = true;                  // swallow the WebView's trailing input event
-    // Safety: if that trailing event never comes, don't let the flag
-    // swallow a later, unrelated keystroke.
-    setTimeout(() => { justCommitted = false; }, 0);
-    try { input.setSelectionRange(np, np); } catch (_) {}
-    autoGrow();
-    try { input.setSelectionRange(np, np); } catch (_) {}   // re-assert after height reflow
     if (pendingEnter) { pendingEnter = false; submitLine(); }
   });
 
@@ -1906,6 +1862,10 @@ function updateKeybarVisibility() {
   // messages), so arrows / Home / End / newline / backspace must edit
   // THE BOX, not get sent to the PTY. The keybar only forwards them to
   // the program when the box is empty (e.g. navigating a claude menu).
+  // These are user-initiated discrete taps, not active composition, so
+  // touching value/selection here is safe; but guard with `composing`
+  // anyway to avoid poking the IME mid-Pinyin. Auto-grow is CSS now,
+  // so none of these call a JS resize.
   function caret() {
     let s = input.selectionStart, e = input.selectionEnd;
     if (typeof s !== 'number') s = e = input.value.length;
@@ -1913,6 +1873,7 @@ function updateKeybarVisibility() {
   }
   window.Compose = {
     hasContent: () => !!input.value,
+    composing: () => composing,
     moveChar(delta) {
       let [s] = caret();
       s = Math.max(0, Math.min(input.value.length, s + delta));
@@ -1954,7 +1915,6 @@ function updateKeybarVisibility() {
       input.value = input.value.slice(0, s) + text + input.value.slice(e);
       const np = s + text.length;
       try { input.setSelectionRange(np, np); } catch (_) {}
-      autoGrow();
     },
     backspace() { return window.__composeBackspace(); },
   };
@@ -1969,7 +1929,6 @@ function updateKeybarVisibility() {
       input.value = input.value.slice(0, s) + input.value.slice(e);
     }
     try { input.setSelectionRange(s, s); } catch (_) {}
-    autoGrow();
     return true;
   };
 })();

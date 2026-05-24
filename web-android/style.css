@@ -975,8 +975,19 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
   outline: none;
   resize: none;
-  overflow-y: auto;
+  /* Auto-grow with content via CSS instead of JS. JS height tweaks
+   * (toggling height:auto to measure scrollHeight) forced a reflow
+   * that reset the caret to the end and, worse, desynced the IME's
+   * composition buffer — breaking mid-text Chinese insertion and
+   * making backspace flaky. field-sizing:content lets the browser
+   * size the textarea to its content with zero JS, so we never touch
+   * the textarea and the native IME behaves normally. On older
+   * WebViews that lack field-sizing it degrades to a fixed 1-row box
+   * with internal scroll (still usable). */
+  field-sizing: content;
+  min-height: 1.35em;
   max-height: 9.5em;            /* ~6 lines, then scroll inside */
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
