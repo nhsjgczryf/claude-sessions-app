@@ -22,6 +22,15 @@ const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
 const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
 const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
 
+// True when the native Android compose bar (ComposeInputPlugin) is
+// available — then we type into a real EditText instead of the
+// in-page textarea, dodging the WebView CJK-caret bug. Declared up
+// top so updateKeybarVisibility / the keybar handler can read it
+// without a temporal-dead-zone hazard. compose-input-bridge.js loads
+// before renderer.js, so window.ComposeInputBridge already exists.
+const usingNativeCompose =
+  !!(window.ComposeInputBridge && window.ComposeInputBridge.available);
+
 // Clipboard helper. navigator.clipboard.* on Android WebView is
 // gated by user-gesture / permission policies that vary by Android
 // version + WebView build, and frequently fails silently (the
@@ -1681,6 +1690,21 @@ function keybarBytesFor(action) {
     if (action === 'mod:ctrl') { setCtrlArmed(!ctrlArmed); return; }
     const tab = tabs.find((t) => t.id === activeTabId);
     if (!tab || !tab.alive) return;
+
+    if (usingNativeCompose) {
+      // Native EditText owns text editing (caret moves by tapping it,
+      // backspace is native). The keybar's job here is just ⏎ (insert
+      // a newline in the message) and PTY control keys; arrows / ⌫ /
+      // Home / End go straight to the PTY (claude menu nav, TUIs).
+      if (action === 'key:Newline') { ComposeInputBridge.insertNewline().catch(() => {}); return; }
+      let b = keybarBytesFor(action);
+      if (b == null) return;
+      if (action.startsWith('char:')) b = applyCtrlIfArmed(b);
+      else if (ctrlArmed) setCtrlArmed(false);
+      bridgeFor(tab).write(tab.id, b).catch(() => {});
+      return;
+    }
+
     const C = window.Compose;
     const hasText = C && C.hasContent() && !C.composing();
 
@@ -1723,7 +1747,11 @@ function updateKeybarVisibility() {
     bar.classList.toggle('hidden', !show);
     if (wasHidden !== !show) layoutChanged = true;
   }
-  if (inputBar) {
+  if (usingNativeCompose) {
+    // Native compose bar lives below the WebView; show/hide it with
+    // the keybar. The JS compose bar stays hidden.
+    ComposeInputBridge.setActive(show).catch(() => {});
+  } else if (inputBar) {
     const wasHidden = inputBar.classList.contains('hidden');
     inputBar.classList.toggle('hidden', !show);
     if (wasHidden !== !show) layoutChanged = true;
@@ -1935,6 +1963,29 @@ function updateKeybarVisibility() {
 
 function composeBackspace() {
   return window.Compose ? window.Compose.backspace() : false;
+}
+
+// Send a composed message to the active tab's PTY. Multi-line content
+// is wrapped in bracketed paste so claude / readline insert it as one
+// block; then a carriage return submits. Shared by the JS compose box
+// and the native compose bar.
+function submitTextToActiveTab(text) {
+  const tab = tabs.find((t) => t.id === activeTabId);
+  if (!tab || !tab.alive) return;
+  if (text) {
+    const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+    bridgeFor(tab).write(tab.id, payload).catch((err) => console.warn('[compose]', err));
+  }
+  bridgeFor(tab).write(tab.id, '\r').catch(() => {});
+}
+
+if (usingNativeCompose) {
+  // The native EditText replaces the in-page compose box entirely.
+  const jsBar = document.getElementById('mobile-input-bar');
+  if (jsBar) jsBar.classList.add('hidden');
+  ComposeInputBridge.onSubmit((ev) => {
+    submitTextToActiveTab((ev && ev.text) || '');
+  });
 }
 
 // ============================================================================

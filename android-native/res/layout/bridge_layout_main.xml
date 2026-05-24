@@ -1,20 +1,77 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-   Overrides Capacitor's bundled bridge_layout_main.xml so the
-   bridge's WebView is our ClaudeSessionsWebView subclass instead of
-   a stock android.webkit.WebView. Android's resource overlay picks
-   the app-module copy over the library copy when both exist with
-   the same name.
+   Overrides Capacitor's bundled bridge_layout_main.xml.
 
-   Capacitor finds the WebView by @+id/webview, so as long as the ID
-   matches and the class is a WebView subclass, the bridge wires up
-   normally. The custom subclass only overrides onCreateInputConnection
-   to wrap incoming IME input with TerminalInputConnection — see
-   TerminalInputConnection.kt for the reason this is needed.
+   Two jobs:
+   1. Make the bridge WebView our ClaudeSessionsWebView subclass
+      (kept from before — its onCreateInputConnection wraps IME input).
+   2. Dock a NATIVE compose bar (EditText + Send) below the WebView.
+      Android WebView has an unfixable Chromium bug where the caret
+      jumps to the end when you edit CJK / non-Latin text in the
+      middle of an <input>/<textarea> (see TerminalInputConnection.kt
+      and the Capacitor forum thread). A native EditText uses
+      Android's own text editing and does NOT have that bug, so we
+      type into it and bridge the text to the WebView via
+      ComposeInputPlugin.
+
+   The root is a vertical LinearLayout: WebView takes all remaining
+   space (height=0 + weight=1), the compose bar wraps at the bottom.
+   With windowSoftInputMode=adjustResize the soft keyboard pushes the
+   whole layout up, so the compose bar always sits right above the
+   keyboard — no manual pixel positioning needed. The bar starts
+   GONE; ComposeInputPlugin shows it when a terminal tab is active.
+
+   Capacitor finds the WebView via @id/webview regardless of nesting.
 -->
-<app.claudesessions.android.ClaudeSessionsWebView
+<LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/webview"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:layout_gravity="center" />
+    android:orientation="vertical"
+    android:background="#1e1e2e">
+
+    <app.claudesessions.android.ClaudeSessionsWebView
+        android:id="@+id/webview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <LinearLayout
+        android:id="@+id/compose_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        android:background="#252536"
+        android:padding="6dp"
+        android:gravity="bottom">
+
+        <EditText
+            android:id="@+id/compose_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#1e1e2e"
+            android:textColor="#cdd6f4"
+            android:textColorHint="#6c7086"
+            android:hint="Tap to type · 中文/英文 · Send →"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:maxLines="6"
+            android:minHeight="44dp"
+            android:padding="10dp"
+            android:textSize="15sp"
+            android:imeOptions="flagNoExtractUi" />
+
+        <Button
+            android:id="@+id/compose_send"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:minWidth="56dp"
+            android:text="↵"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="#1e1e2e"
+            android:background="#89b4fa" />
+    </LinearLayout>
+</LinearLayout>

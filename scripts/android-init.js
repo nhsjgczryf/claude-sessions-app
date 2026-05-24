@@ -168,7 +168,7 @@ function patchMainActivity(pkgDir) {
 
   if (fs.existsSync(ktPath)) {
     const current = fs.readFileSync(ktPath, 'utf8');
-    if (current.includes('registerPlugin(LocalShellPlugin::class.java)')) return;
+    if (current.includes('registerPlugin(ComposeInputPlugin::class.java)')) return;
     const replacement = `package ${APP_PACKAGE}
 
 import android.os.Bundle
@@ -180,18 +180,19 @@ class MainActivity : BridgeActivity() {
         // bridge initializes so the WebView sees them on first paint.
         registerPlugin(SshPlugin::class.java)
         registerPlugin(LocalShellPlugin::class.java)
+        registerPlugin(ComposeInputPlugin::class.java)
         super.onCreate(savedInstanceState)
     }
 }
 `;
     fs.writeFileSync(ktPath, replacement);
-    console.log('[android-init] patched MainActivity.kt (SshPlugin + LocalShellPlugin)');
+    console.log('[android-init] patched MainActivity.kt (Ssh + LocalShell + ComposeInput)');
     return;
   }
 
   if (fs.existsSync(javaPath)) {
     const current = fs.readFileSync(javaPath, 'utf8');
-    if (current.includes('registerPlugin(LocalShellPlugin.class)')) return;
+    if (current.includes('registerPlugin(ComposeInputPlugin.class)')) return;
     const replacement = `package ${APP_PACKAGE};
 
 import android.os.Bundle;
@@ -204,12 +205,13 @@ public class MainActivity extends BridgeActivity {
         // bridge initializes so the WebView sees them on first paint.
         registerPlugin(SshPlugin.class);
         registerPlugin(LocalShellPlugin.class);
+        registerPlugin(ComposeInputPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
 `;
     fs.writeFileSync(javaPath, replacement);
-    console.log('[android-init] patched MainActivity.java (SshPlugin + LocalShellPlugin)');
+    console.log('[android-init] patched MainActivity.java (Ssh + LocalShell + ComposeInput)');
     return;
   }
 
@@ -468,6 +470,17 @@ function patchManifest() {
             android:exported="false" />`;
   if (!m.includes('ForegroundService')) {
     m = m.replace(/<\/application>/, `    ${serviceTag}\n    </application>`);
+  }
+
+  // adjustResize so the soft keyboard pushes the whole layout up,
+  // keeping the native compose bar (bottom of bridge_layout_main.xml)
+  // visible right above the keyboard instead of hidden behind it.
+  if (/android:windowSoftInputMode=/.test(m)) {
+    m = m.replace(/android:windowSoftInputMode="[^"]*"/, 'android:windowSoftInputMode="adjustResize"');
+  } else {
+    // Add it to the MainActivity tag.
+    m = m.replace(/(<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*)>/,
+      (full, head) => `${head} android:windowSoftInputMode="adjustResize">`);
   }
 
   fs.writeFileSync(manifest, m);
