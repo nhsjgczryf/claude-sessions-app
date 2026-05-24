@@ -1818,21 +1818,55 @@ function updateKeybarVisibility() {
     clearBox();
   }
 
-  input.addEventListener('input', autoGrow);
-  input.addEventListener('compositionstart', () => { composing = true; });
+  // Capture value + caret when an IME composition begins, and a flag
+  // to swallow the trailing input event after we override the commit.
+  let preComposeValue = '';
+  let preComposeStart = 0;
+  let justCommitted = false;
 
-  // Enter submits; Shift+Enter inserts a newline (default textarea
-  // behavior — we just let it through and re-grow). Enter pressed
-  // WHILE composing (Gboard has the word underlined as a candidate)
-  // fires keydown with isComposing=true and the IME swallows it to
-  // commit the candidate; we defer the submit to compositionend so
-  // "/clear" + Enter still executes.
-  let pendingEnter = false;
-  input.addEventListener('compositionend', () => setTimeout(() => {
-    composing = false;
+  input.addEventListener('input', (e) => {
+    if (composing) return;                 // mid-composition: ignore
+    if (justCommitted) { justCommitted = false; return; }  // handled in compositionend
     autoGrow();
+  });
+
+  input.addEventListener('compositionstart', () => {
+    composing = true;
+    preComposeValue = input.value;
+    let s = input.selectionStart;
+    if (typeof s !== 'number') s = input.value.length;
+    preComposeStart = Math.max(0, Math.min(input.value.length, s));
+  });
+
+  // Enter submits; Shift+Enter inserts a newline. Enter pressed WHILE
+  // composing (Gboard has the word underlined) fires keydown with
+  // isComposing=true and the IME swallows it to commit; we defer the
+  // submit to compositionend so "/clear" + Enter still executes.
+  let pendingEnter = false;
+
+  // On commit, DON'T trust the WebView's own insertion: Android
+  // WebView mis-places IME-composed text when the caret is in the
+  // middle of a textarea (it lands at the end). We reconstruct the
+  // insertion deterministically from the value + caret captured at
+  // compositionstart, so 中文 inserts exactly where the caret was —
+  // matching what already worked for plain (non-IME) English.
+  input.addEventListener('compositionend', (e) => {
+    composing = false;
+    const text = e.data || '';
+    const start = Math.min(preComposeStart, preComposeValue.length);
+    const before = preComposeValue.slice(0, start);
+    const after = preComposeValue.slice(start);
+    input.value = before + text + after;
+    const np = start + text.length;
+    justCommitted = true;                  // swallow the WebView's trailing input event
+    // Safety: if that trailing event never comes, don't let the flag
+    // swallow a later, unrelated keystroke.
+    setTimeout(() => { justCommitted = false; }, 0);
+    try { input.setSelectionRange(np, np); } catch (_) {}
+    autoGrow();
+    try { input.setSelectionRange(np, np); } catch (_) {}   // re-assert after height reflow
     if (pendingEnter) { pendingEnter = false; submitLine(); }
-  }, 0));
+  });
 
   input.addEventListener('keydown', (e) => {
     // Ctrl armed (tapped the keybar Ctrl): the next ASCII letter typed
