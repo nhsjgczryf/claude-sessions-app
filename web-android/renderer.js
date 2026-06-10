@@ -1911,21 +1911,19 @@ function updateKeybarVisibility() {
 
   function clearBox() { input.value = ''; }
 
-  // Send the composed text, then a carriage return so the shell / TUI
-  // executes it. Multi-line content is wrapped in bracketed paste so
-  // claude / readline insert it atomically as one block rather than
-  // treating each embedded newline as a separate submit.
-  function submitLine() {
-    const text = input.value;
-    if (text) {
-      if (text.includes('\n')) {
-        send(`\x1b[200~${text}\x1b[201~`);
-      } else {
-        send(text);
-      }
+  // Delegates to submitTextToActiveTab (bracketed paste for multi-line
+  // / non-ASCII-into-TUI, 120ms text→Enter gap, error surfacing) and
+  // only clears the box when the send actually went through.
+  let submitting = false;
+  async function submitLine() {
+    if (submitting) return;
+    submitting = true;
+    try {
+      const ok = await submitTextToActiveTab(input.value);
+      if (ok) clearBox();
+    } finally {
+      submitting = false;
     }
-    send('\r');
-    clearBox();
   }
 
   input.addEventListener('compositionstart', () => { composing = true; });
@@ -2053,26 +2051,62 @@ function composeBackspace() {
   return window.Compose ? window.Compose.backspace() : false;
 }
 
-// Send a composed message to the active tab's PTY. Multi-line content
-// is wrapped in bracketed paste so claude / readline insert it as one
-// block; then a carriage return submits. Shared by the JS compose box
-// and the native compose bar.
-function submitTextToActiveTab(text) {
+// Send a composed message to the active tab's PTY. Resolves true only
+// when the bytes were actually handed to the bridge — callers clear
+// the compose box on success, so a dead tab / write failure keeps the
+// user's text instead of silently eating it.
+//
+// Two delivery details, both learned from lost-message reports:
+//   - Bracketed paste is needed not just for multi-line text but for
+//     ANY non-ASCII going into an alt-screen TUI: claude's Ink input
+//     processes raw bytes as individual keypresses and silently drops
+//     non-ASCII, so a single-line 中文 message sent raw just vanishes.
+//   - The trailing \r must not ride right on the text's heels: Ink
+//     ingests the paste asynchronously, and an Enter that arrives in
+//     the same instant can be processed before the text lands (the
+//     classic `tmux send-keys` race). A short pause fixes it.
+async function submitTextToActiveTab(text) {
   const tab = tabs.find((t) => t.id === activeTabId);
-  if (!tab || !tab.alive) return;
-  if (text) {
-    const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
-    bridgeFor(tab).write(tab.id, payload).catch((err) => console.warn('[compose]', err));
+  if (!tab || !tab.alive) {
+    notify('没有活动会话，消息未发送（已保留在输入框）', 'error');
+    return false;
   }
-  bridgeFor(tab).write(tab.id, '\r').catch(() => {});
+  try {
+    if (text) {
+      const altScreen = tab.term.buffer && tab.term.buffer.active &&
+        tab.term.buffer.active.type === 'alternate';
+      const needsBracket = text.includes('\n') ||
+        (altScreen && /[^\x00-\x7F]/.test(text));
+      const payload = needsBracket ? `\x1b[200~${text}\x1b[201~` : text;
+      await bridgeFor(tab).write(tab.id, payload);
+      await sleep(120);
+    }
+    await bridgeFor(tab).write(tab.id, '\r');
+    return true;
+  } catch (err) {
+    notify('发送失败：' + (err && err.message || err) + '（消息已保留）', 'error');
+    return false;
+  }
 }
 
 if (usingNativeCompose) {
   // The native EditText replaces the in-page compose box entirely.
   const jsBar = document.getElementById('mobile-input-bar');
   if (jsBar) jsBar.classList.add('hidden');
-  ComposeInputBridge.onSubmit((ev) => {
-    submitTextToActiveTab((ev && ev.text) || '');
+  // The native bar no longer clears itself on Send — we clear it here
+  // only after the PTY write succeeded, so failures keep the draft.
+  // The in-flight flag stops a double-tap on ↵ during the 120ms
+  // text→Enter gap from submitting the same draft twice.
+  let composeInFlight = false;
+  ComposeInputBridge.onSubmit(async (ev) => {
+    if (composeInFlight) return;
+    composeInFlight = true;
+    try {
+      const ok = await submitTextToActiveTab((ev && ev.text) || '');
+      if (ok) ComposeInputBridge.clear().catch(() => {});
+    } finally {
+      composeInFlight = false;
+    }
   });
   // Safety net: if the native views never wired up (layout override
   // didn't take), fall back to the in-page compose box so the user

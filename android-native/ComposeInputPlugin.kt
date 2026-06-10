@@ -97,7 +97,9 @@ class ComposeInputPlugin : Plugin() {
         val text = e.text?.toString() ?: ""
         val ev = JSObject().apply { put("text", text) }
         notifyListeners("submit", ev)
-        e.setText("")
+        // Deliberately NOT clearing here. The JS side calls clear()
+        // after the PTY write succeeds; clearing eagerly meant a dead
+        // tab / failed write silently ate the user's message.
     }
 
     @PluginMethod
