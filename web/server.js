@@ -150,6 +150,12 @@ app.use(
   '/vendor/xterm',
   express.static(path.join(__dirname, '..', 'node_modules', '@xterm'))
 );
+// File-preview render libs (marked / DOMPurify / KaTeX), served straight
+// from node_modules like xterm so the browser loads them offline.
+const NM = path.join(__dirname, '..', 'node_modules');
+app.use('/vendor/marked', express.static(path.join(NM, 'marked')));
+app.use('/vendor/dompurify', express.static(path.join(NM, 'dompurify', 'dist')));
+app.use('/vendor/katex', express.static(path.join(NM, 'katex', 'dist')));
 
 // ---- auth API --------------------------------------------------------
 

@@ -17,5 +17,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('terminal-exit', (_e, tabId, exitCode) => callback(tabId, exitCode)),
   pasteClipboardImage: () => ipcRenderer.invoke('paste-clipboard-image'),
   scpUpload: (sshHost, localPath) => ipcRenderer.invoke('scp-upload', sshHost, localPath),
+  readFile: (filePath, maxBytes, sshHost) =>
+    ipcRenderer.invoke('read-file', filePath, maxBytes, sshHost),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),
 });

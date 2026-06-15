@@ -986,13 +986,7 @@ function attachKeyboardHandlers(tab) {
 
   container.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (term.hasSelection()) {
-      navigator.clipboard.writeText(term.getSelection()).catch(() => {});
-      term.clearSelection();
-      notify('Copied', 'success');
-    } else {
-      navigator.clipboard.readText().then((t) => { if (t) bracketedPaste(tabId, t); }).catch(() => {});
-    }
+    showTerminalContextMenu(e.clientX, e.clientY, tab);
   });
 
   // Browser-level paste event also catches images dropped via Ctrl+V
@@ -1009,6 +1003,54 @@ function attachKeyboardHandlers(tab) {
         return;
       }
     }
+  });
+}
+
+// Terminal right-click menu: copy / preview-selected-path / paste.
+// Preview reads the file via the server's /api/fs/read and hands it to
+// the shared FilePreview module (markdown +LaTeX / images / text).
+function showTerminalContextMenu(x, y, tab) {
+  const term = tab.term;
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const items = [];
+  if (term.hasSelection()) {
+    const sel = term.getSelection();
+    items.push({ label: 'Copy', action: () => {
+      navigator.clipboard.writeText(sel).catch(() => {});
+      term.clearSelection(); notify('Copied', 'success');
+    }});
+    items.push({ label: '预览文件', action: () => openPreviewForSelection(sel) });
+  }
+  items.push({ label: 'Paste', action: () => {
+    navigator.clipboard.readText().then((t) => { if (t) bracketedPaste(tab.id, t); }).catch(() => {});
+  }});
+  for (const item of items) {
+    const mi = document.createElement('div');
+    mi.className = 'menu-item';
+    mi.textContent = item.label;
+    mi.addEventListener('click', () => { menu.classList.add('hidden'); item.action(); });
+    menu.appendChild(mi);
+  }
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(x, vw - 160) + 'px';
+  menu.style.top = Math.min(y, vh - 140) + 'px';
+  menu.classList.remove('hidden');
+}
+
+async function readFileForPreview(filePath, maxBytes) {
+  const qs = new URLSearchParams({ path: filePath, max: String(maxBytes) });
+  return api('GET', '/api/fs/read?' + qs.toString());
+}
+
+function openPreviewForSelection(sel) {
+  if (!window.FilePreview) { notify('Preview module not loaded', 'error'); return; }
+  window.FilePreview.open({
+    path: sel,
+    read: readFileForPreview,
+    clip: (t) => navigator.clipboard.writeText(t).catch(() => {}),
+    notify,
+    openExternal: (u) => window.open(u, '_blank'),
   });
 }
 

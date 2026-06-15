@@ -4,6 +4,21 @@ const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { Unicode11Addon } = require('@xterm/addon-unicode11');
 
+// Populate the globals the shared file-preview.js module reads. Under
+// Electron's nodeIntegration a UMD <script> would attach to
+// module.exports instead of window, so we require() the libs and assign
+// them ourselves. Each is optional — the module degrades to plain text.
+try {
+  const m = require('marked');
+  window.marked = m.marked || m;
+  const dp = require('dompurify');
+  window.DOMPurify = dp && dp.sanitize ? dp : (typeof dp === 'function' ? dp(window) : dp);
+  window.katex = require('katex');
+  window.renderMathInElement = require('katex/dist/contrib/auto-render.js');
+} catch (e) {
+  console.warn('[preview] render libs unavailable:', e && e.message);
+}
+
 const THEME = {
   background: '#1e1e2e',
   foreground: '#cdd6f4',
@@ -631,14 +646,57 @@ function attachKeyboardHandlers(tab) {
 
   container.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (term.hasSelection()) {
-      clipboard.writeText(term.getSelection());
-      term.clearSelection();
-      notify('Copied', 'success');
-    } else {
-      const text = clipboard.readText();
-      if (text) bracketedPaste(tabId, text);
-    }
+    showTerminalContextMenu(e.clientX, e.clientY, tabId);
+  });
+}
+
+// Terminal right-click menu: copy / preview-selected-path / paste.
+// Preview reads the file (local fs, or over ssh for SSH sessions) via
+// the main process and renders it with the shared FilePreview module.
+function showTerminalContextMenu(x, y, tabId) {
+  const tab = tabs.find((t) => t.id === tabId);
+  if (!tab) return;
+  const term = tab.term;
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const items = [];
+  if (term.hasSelection()) {
+    const sel = term.getSelection();
+    items.push({ label: 'Copy', action: () => {
+      clipboard.writeText(sel); term.clearSelection(); notify('Copied', 'success');
+    }});
+    items.push({ label: '预览文件', action: () => openPreviewForSelection(tab, sel) });
+  }
+  items.push({ label: 'Paste', action: () => {
+    const text = clipboard.readText(); if (text) bracketedPaste(tabId, text);
+  }});
+  for (const item of items) {
+    const mi = document.createElement('div');
+    mi.className = 'menu-item';
+    mi.textContent = item.label;
+    mi.addEventListener('click', () => { menu.classList.add('hidden'); item.action(); });
+    menu.appendChild(mi);
+  }
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(x, vw - 160) + 'px';
+  menu.style.top = Math.min(y, vh - 140) + 'px';
+  menu.classList.remove('hidden');
+}
+
+function openPreviewForSelection(tab, sel) {
+  if (!window.FilePreview) { notify('Preview module not loaded', 'error'); return; }
+  const session = sessions.find((s) => s.id === tab.sessionId);
+  const sshHost = session && session.type === 'ssh' ? session.ssh_host : null;
+  window.FilePreview.open({
+    path: sel,
+    read: async (p, max) => {
+      const res = await ipcRenderer.invoke('read-file', p, max, sshHost);
+      if (res && res.error) throw new Error(res.error);
+      return res;
+    },
+    clip: (t) => clipboard.writeText(t),
+    notify,
+    openExternal: (u) => shell.openExternal(u).catch(() => {}),
   });
 }
 

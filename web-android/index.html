@@ -253,21 +253,9 @@
 
   <input id="image-file-input" type="file" accept="image/*" hidden />
 
-  <!-- Read-only file preview. Opened from the terminal selection
-       toolbar (select a path → 预览). Renders markdown (+LaTeX),
-       images, and plain text; read over whichever transport the active
-       tab uses (SFTP / agent /api/fs/read / local rootfs). -->
-  <div id="file-preview" class="hidden">
-    <div class="file-preview-box">
-      <div class="file-preview-header">
-        <span id="file-preview-path" class="file-preview-path"></span>
-        <button type="button" id="file-preview-copy" title="Copy file contents">Copy</button>
-        <button type="button" id="file-preview-close" title="Close">&times;</button>
-      </div>
-      <div id="file-preview-banner" class="file-preview-banner hidden"></div>
-      <div id="file-preview-body" class="file-preview-body"></div>
-    </div>
-  </div>
+  <!-- The read-only file preview overlay is built at runtime by the
+       shared file-preview.js module (window.FilePreview), opened from
+       the terminal selection toolbar (select a path → 预览). -->
 
   <div id="context-menu" class="hidden"></div>
 
@@ -275,6 +263,7 @@
   <script src="local-shell-bridge.js"></script>
   <script src="ws-bridge.js"></script>
   <script src="compose-input-bridge.js"></script>
+  <script src="file-preview.js"></script>
   <script src="session-builder.js"></script>
   <script src="renderer.js"></script>
 </body>

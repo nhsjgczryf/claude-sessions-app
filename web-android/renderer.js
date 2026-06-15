@@ -1462,187 +1462,21 @@ const FileBridge = {
   },
 };
 
-const IMG_EXT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
-  gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
-  svg: 'image/svg+xml' };
-const MD_EXT = { md: 1, markdown: 1, mdown: 1, mkd: 1, mkdn: 1 };
-const IMG_MAX = 10 * 1024 * 1024;   // base64 inflates ~33%; cap so the WebView survives
-const TEXT_MAX = 1024 * 1024;
-
-// Normalize a path token grabbed from terminal output: strip wrapping
-// quotes/backticks/parens and a trailing :line[:col] (claude prints
-// "Edited src/foo.ts:42") so the path actually resolves.
-function cleanPath(raw) {
-  let p = (raw || '').trim();
-  p = p.replace(/^[`'"(<\[]+/, '').replace(/[`'")>\].,]+$/, '');
-  p = p.replace(/:\d+(:\d+)?$/, '');
-  return p.trim();
-}
-
-function extOf(p) {
-  const base = p.split('/').pop() || '';
-  const dot = base.lastIndexOf('.');
-  return dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
-}
-
-function b64ToBytes(b64) {
-  const bin = atob(b64 || '');
-  const len = bin.length;
-  const out = new Uint8Array(len);
-  for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-function looksBinary(bytes) {
-  // A NUL in the first chunk is the classic "this is binary" tell.
-  const n = Math.min(bytes.length, 8192);
-  for (let i = 0; i < n; i++) if (bytes[i] === 0) return true;
-  return false;
-}
-
-function humanSize(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
-}
-
-function setPreviewBanner(text, kind) {
-  const b = $('#file-preview-banner');
-  if (!b) return;
-  if (!text) { b.classList.add('hidden'); return; }
-  b.textContent = text;
-  b.className = 'file-preview-banner' + (kind ? ' ' + kind : '');
-  b.classList.remove('hidden');
-}
-
-let previewState = { text: null };   // raw text for the Copy button
-
-async function openFilePreview(tabId, rawPath) {
+// The render + overlay logic lives in the shared file-preview.js module
+// (window.FilePreview), identical across Electron / web / APK. Here we
+// just resolve the tab and hand it a transport-specific read().
+function openFilePreview(tabId, rawPath) {
   const tab = tabs.find((t) => t.id === tabId);
   if (!tab) { notify('会话已关闭', 'error'); return; }
-  const filePath = cleanPath(rawPath);
-  if (!filePath) { notify('不是有效路径', 'error'); return; }
-
-  const overlay = $('#file-preview');
-  const body = $('#file-preview-body');
-  const pathEl = $('#file-preview-path');
-  previewState.text = null;
-  pathEl.textContent = filePath;
-  setPreviewBanner('', '');
-  body.className = 'file-preview-body';
-  body.textContent = '加载中…';
-  overlay.classList.remove('hidden');
-
-  const ext = extOf(filePath);
-  const isImage = !!IMG_EXT[ext];
-  const maxBytes = isImage ? IMG_MAX : TEXT_MAX;
-
-  let res;
-  try {
-    res = await FileBridge.read(tab, filePath, maxBytes);
-  } catch (err) {
-    body.textContent = '';
-    setPreviewBanner('读取失败：' + (err && err.message || err), 'error');
-    return;
-  }
-  if (!res || res.base64 == null) {
-    body.textContent = '';
-    setPreviewBanner('读取失败：空响应', 'error');
-    return;
-  }
-
-  if (res.truncated) {
-    setPreviewBanner(
-      `文件 ${humanSize(res.size)}，仅预览前 ${humanSize(maxBytes)}` +
-      (isImage ? '（图片过大，可能无法显示）' : '（已截断）'), 'warn');
-  }
-
-  const bytes = b64ToBytes(res.base64);
-
-  if (isImage) {
-    body.classList.add('is-image');
-    const img = document.createElement('img');
-    img.alt = filePath;
-    img.src = `data:${IMG_EXT[ext]};base64,${res.base64}`;
-    img.onerror = () => setPreviewBanner('无法显示该图片（格式不支持或已截断）', 'error');
-    body.textContent = '';
-    body.appendChild(img);
-    return;
-  }
-
-  if (looksBinary(bytes)) {
-    body.textContent = '';
-    setPreviewBanner(`二进制文件，${humanSize(res.size)} — 不支持预览`, 'warn');
-    return;
-  }
-
-  const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-  previewState.text = text;
-
-  if (MD_EXT[ext] && window.marked && window.DOMPurify) {
-    renderMarkdown(body, text);
-  } else {
-    body.classList.add('is-text');
-    const pre = document.createElement('pre');
-    pre.textContent = text;
-    body.textContent = '';
-    body.appendChild(pre);
-  }
-}
-
-function renderMarkdown(body, text) {
-  body.classList.add('is-markdown');
-  let html;
-  try {
-    html = window.marked.parse(text, { breaks: true, gfm: true });
-  } catch (_) {
-    body.classList.remove('is-markdown'); body.classList.add('is-text');
-    const pre = document.createElement('pre'); pre.textContent = text;
-    body.textContent = ''; body.appendChild(pre); return;
-  }
-  // Sanitize before injecting — the preview lives in the same WebView as
-  // the Capacitor bridge, so a malicious README must not be able to run
-  // script / reach the native plugins.
-  body.innerHTML = window.DOMPurify.sanitize(html);
-  // KaTeX: render $…$ / $$…$$ after the HTML is in the DOM. Optional —
-  // skipped if the math files weren't vendored.
-  if (window.renderMathInElement) {
-    try {
-      window.renderMathInElement(body, {
-        delimiters: [
-          { left: '$$', right: '$$', display: true },
-          { left: '$', right: '$', display: false },
-          { left: '\\(', right: '\\)', display: false },
-          { left: '\\[', right: '\\]', display: true },
-        ],
-        throwOnError: false,
-      });
-    } catch (_) {}
-  }
-  // External links open in the system browser, not inside the app.
-  body.querySelectorAll('a[href]').forEach((a) => { a.target = '_blank'; a.rel = 'noopener'; });
-}
-
-function closeFilePreview() {
-  const overlay = $('#file-preview');
-  if (overlay) overlay.classList.add('hidden');
-  const body = $('#file-preview-body');
-  if (body) body.textContent = '';
-  previewState.text = null;
-}
-
-(function wireFilePreview() {
-  const closeBtn = $('#file-preview-close');
-  const copyBtn = $('#file-preview-copy');
-  const overlay = $('#file-preview');
-  if (closeBtn) closeBtn.addEventListener('click', closeFilePreview);
-  if (overlay) overlay.addEventListener('click', (e) => { if (e.target === overlay) closeFilePreview(); });
-  if (copyBtn) copyBtn.addEventListener('click', () => {
-    if (previewState.text == null) { notify('没有可复制的文本', 'info'); return; }
-    Clip.write(previewState.text);
-    notify('已复制文件内容', 'success');
+  if (!window.FilePreview) { notify('预览模块未加载', 'error'); return; }
+  window.FilePreview.open({
+    path: rawPath,
+    read: (p, max) => FileBridge.read(tab, p, max),
+    clip: (t) => Clip.write(t),
+    notify,
+    openExternal: (u) => { try { window.open(u, '_blank'); } catch (_) {} },
   });
-})();
+}
 
 // ============================================================================
 // Image paste (gallery → SFTP)

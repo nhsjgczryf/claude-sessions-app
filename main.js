@@ -530,6 +530,60 @@ ipcMain.handle('paste-clipboard-image', () => {
 
 ipcMain.handle('scp-upload', (_evt, sshHost, localPath) => scpUpload(sshHost, localPath));
 
+// Read a file for the read-only preview. Local sessions read straight
+// off this machine's fs; SSH sessions run `wc -c` + `head -c | base64`
+// on the remote so we read the file the user actually sees in that
+// terminal. Returns { base64, size, truncated } (or { error }). Capped
+// at maxBytes so a huge file can't blow up the IPC buffer.
+ipcMain.handle('read-file', async (_evt, filePath, maxBytes, sshHost) => {
+  const HARD_MAX = 16 * 1024 * 1024;
+  let max = parseInt(maxBytes, 10);
+  if (!Number.isFinite(max) || max <= 0) max = 1024 * 1024;
+  max = Math.min(max, HARD_MAX);
+
+  if (sshHost) {
+    const { execFile } = require('child_process');
+    const q = "'" + String(filePath).replace(/'/g, "'\\''") + "'";
+    const remote =
+      `wc -c < ${q} 2>/dev/null; printf '__B64__\\n'; head -c ${max} ${q} 2>/dev/null | base64`;
+    return new Promise((resolve) => {
+      execFile('ssh', [sshHost, remote], { timeout: 30000, maxBuffer: 48 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err) return resolve({ error: `ssh read failed: ${err.message}` });
+          const sep = stdout.indexOf('__B64__\n');
+          if (sep < 0) return resolve({ error: 'unexpected remote output' });
+          const size = parseInt(stdout.slice(0, sep).trim(), 10);
+          if (!Number.isFinite(size)) return resolve({ error: 'file not found or not readable' });
+          const base64 = stdout.slice(sep + 8).replace(/\s+/g, '');
+          resolve({ base64, size, truncated: size > max });
+        });
+    });
+  }
+
+  try {
+    const resolved = path.resolve(filePath);
+    const st = fs.statSync(resolved);
+    if (!st.isFile()) return { error: 'not a regular file' };
+    const size = st.size;
+    const toRead = Math.min(size, max);
+    const fd = fs.openSync(resolved, 'r');
+    try {
+      const buf = Buffer.alloc(toRead);
+      let read = 0;
+      while (read < toRead) {
+        const n = fs.readSync(fd, buf, read, toRead - read, read);
+        if (n <= 0) break;
+        read += n;
+      }
+      return { base64: buf.subarray(0, read).toString('base64'), size, truncated: size > max };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    return { error: String(err && err.message || err) };
+  }
+});
+
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {

@@ -16,11 +16,19 @@
   <meta name="mobile-web-app-capable" content="yes" />
 
   <link rel="stylesheet" href="/vendor/xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/xterm/xterm/lib/xterm.js"></script>
   <script src="/vendor/xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="/vendor/xterm/addon-web-links/lib/addon-web-links.js"></script>
   <script src="/vendor/xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+  <!-- File-preview renderers (marked → HTML, DOMPurify sanitizes it,
+       KaTeX renders LaTeX). Served from node_modules; each is feature-
+       detected by file-preview.js and degrades to plain text. -->
+  <script src="/vendor/marked/marked.min.js"></script>
+  <script src="/vendor/dompurify/purify.min.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/vendor/katex/contrib/auto-render.min.js"></script>
 </head>
 <body>
   <div id="sidebar">
@@ -226,6 +234,7 @@
 
   <div id="context-menu" class="hidden"></div>
 
+  <script src="/file-preview.js"></script>
   <script src="/renderer.js"></script>
 </body>
 </html>
