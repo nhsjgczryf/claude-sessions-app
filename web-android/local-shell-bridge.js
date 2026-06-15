@@ -64,6 +64,14 @@
       return SHELL.setActiveTab({ tabId: tabId == null ? null : tabId });
     },
 
+    // Read a file from inside the bundled Alpine rootfs for preview.
+    // path is guest-absolute (/root/foo.md) or relative to /root.
+    // Resolves { base64, size, truncated }.
+    async readFile(path, maxBytes) {
+      if (!SHELL) { notSupported('readFile'); throw new Error('LocalShell plugin unavailable'); }
+      return SHELL.readFile({ path, maxBytes: maxBytes || (1024 * 1024) });
+    },
+
     onData(cb) { dataListeners.add(cb); return () => dataListeners.delete(cb); },
     onExit(cb) { exitListeners.add(cb); return () => exitListeners.delete(cb); },
     onStatus(cb) { statusListeners.add(cb); return () => statusListeners.delete(cb); },

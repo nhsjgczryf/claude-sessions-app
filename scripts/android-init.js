@@ -73,6 +73,48 @@ function vendorXterm() {
   }
 }
 
+// Vendor the file-preview renderers (markdown + sanitizer + LaTeX) from
+// node_modules so the WebView can load them offline — same rationale as
+// xterm. marked → HTML, DOMPurify sanitizes it (the preview shares the
+// WebView with the Capacitor native bridge, so unsanitized markdown is
+// an injection path to the plugins), KaTeX renders math.
+function vendorPreviewLibs() {
+  const vendor = path.join(WEB_ANDROID, 'vendor');
+  // [candidate source paths (first that exists wins), destination].
+  // Candidates guard against minor package-layout drift between versions.
+  const files = [
+    [['marked/marked.min.js', 'marked/lib/marked.umd.js'],
+      path.join(vendor, 'marked', 'marked.min.js')],
+    [['dompurify/dist/purify.min.js'],
+      path.join(vendor, 'dompurify', 'purify.min.js')],
+    [['katex/dist/katex.min.js'],
+      path.join(vendor, 'katex', 'katex.min.js')],
+    [['katex/dist/katex.min.css'],
+      path.join(vendor, 'katex', 'katex.min.css')],
+    [['katex/dist/contrib/auto-render.min.js'],
+      path.join(vendor, 'katex', 'auto-render.min.js')],
+  ];
+  for (const [candidates, to] of files) {
+    const abs = candidates
+      .map((c) => path.join(ROOT, 'node_modules', c))
+      .find((p) => fs.existsSync(p));
+    if (!abs) {
+      throw new Error(`vendoring failed: none of [${candidates.join(', ')}] in node_modules — run npm install first`);
+    }
+    copyIfChanged(abs, to);
+  }
+  // KaTeX's CSS references ./fonts/KaTeX_*.woff2 relative to itself, so
+  // the whole fonts dir has to sit next to katex.min.css.
+  const fontsSrc = path.join(ROOT, 'node_modules', 'katex', 'dist', 'fonts');
+  const fontsDst = path.join(vendor, 'katex', 'fonts');
+  if (fs.existsSync(fontsSrc)) {
+    fs.mkdirSync(fontsDst, { recursive: true });
+    for (const f of fs.readdirSync(fontsSrc)) {
+      if (f.endsWith('.woff2')) copyIfChanged(path.join(fontsSrc, f), path.join(fontsDst, f));
+    }
+  }
+}
+
 // ---------------------------------------------------------------------
 // 2. Capacitor scaffold
 // ---------------------------------------------------------------------
@@ -559,6 +601,7 @@ function patchTargetSdk() {
 // ---------------------------------------------------------------------
 
 vendorXterm();
+vendorPreviewLibs();
 ensureCapacitorProject();
 copyNativeSources();
 patchProjectGradle();

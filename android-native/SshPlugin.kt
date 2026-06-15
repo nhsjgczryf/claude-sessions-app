@@ -405,6 +405,50 @@ class SshPlugin : Plugin() {
         }
     }
 
+    /**
+     * Download a remote file for read-only preview. Reads at most
+     * maxBytes (the caller's cap) so a giant log/binary can't OOM the
+     * WebView when base64'd. Returns { base64, size, truncated } where
+     * size is the file's true size and truncated=true means we stopped
+     * at maxBytes. Runs off the UI thread; no shell, pure SFTP.
+     */
+    @PluginMethod
+    fun sftpGet(call: PluginCall) {
+        val tabId = call.getString("tabId") ?: return call.reject("tabId required")
+        val remotePath = call.getString("remotePath") ?: return call.reject("remotePath required")
+        val maxBytes = (call.getInt("maxBytes") ?: (1024 * 1024)).coerceAtLeast(1)
+        val entry = sessions[tabId] ?: return call.reject("no session for tabId")
+
+        thread(name = "sftp-get-$tabId") {
+            try {
+                entry.client.newSFTPClient().use { sftp ->
+                    val attrs = sftp.stat(remotePath)
+                    val size = attrs.size
+                    val toRead = minOf(size, maxBytes.toLong()).toInt()
+                    val buf = ByteArray(toRead)
+                    var read = 0
+                    sftp.open(remotePath).use { rf ->
+                        // RemoteFile.read(fileOffset, dst, off, len) returns
+                        // bytes read or -1 at EOF; loop until we fill buf.
+                        while (read < toRead) {
+                            val n = rf.read(read.toLong(), buf, read, toRead - read)
+                            if (n <= 0) break
+                            read += n
+                        }
+                    }
+                    val out = if (read == buf.size) buf else buf.copyOf(read)
+                    call.resolve(JSObject().apply {
+                        put("base64", Base64.encodeToString(out, Base64.NO_WRAP))
+                        put("size", size)
+                        put("truncated", size > maxBytes.toLong())
+                    })
+                }
+            } catch (e: Exception) {
+                call.reject(e.message ?: "sftp get failed", e)
+            }
+        }
+    }
+
     // ------------------------------------------------------------ list
 
     @PluginMethod

@@ -180,6 +180,53 @@ class LocalShellPlugin : Plugin() {
     }
 
     /**
+     * Read a file from inside the bundled Alpine rootfs for read-only
+     * preview. A guest-absolute path like /root/foo.md maps to the host
+     * path filesDir/linux/root/foo.md (proot is just a chroot over that
+     * directory); a relative path resolves against /root. We canonicalize
+     * and verify the result stays under linuxDir so a crafted ../ path
+     * can't escape the rootfs and read arbitrary app/system files.
+     * Reads at most maxBytes; returns { base64, size, truncated }.
+     */
+    @PluginMethod
+    fun readFile(call: PluginCall) {
+        val pathArg = call.getString("path") ?: return call.reject("path required")
+        val maxBytes = (call.getInt("maxBytes") ?: (1024 * 1024)).coerceAtLeast(1)
+        thread(name = "local-readfile") {
+            try {
+                val root = linuxDir().canonicalFile
+                val rel = pathArg.removePrefix("/").ifEmpty { "root" }
+                val guestAbs = if (pathArg.startsWith("/")) rel else "root/$rel"
+                val target = File(root, guestAbs).canonicalFile
+                if (target != root && !target.path.startsWith(root.path + File.separator)) {
+                    call.reject("path escapes the Linux rootfs")
+                    return@thread
+                }
+                if (!target.isFile) { call.reject("not a file: $pathArg"); return@thread }
+                val size = target.length()
+                val toRead = minOf(size, maxBytes.toLong()).toInt()
+                val buf = ByteArray(toRead)
+                target.inputStream().use { ins ->
+                    var read = 0
+                    while (read < toRead) {
+                        val n = ins.read(buf, read, toRead - read)
+                        if (n <= 0) break
+                        read += n
+                    }
+                    val out = if (read == buf.size) buf else buf.copyOf(read)
+                    call.resolve(JSObject().apply {
+                        put("base64", android.util.Base64.encodeToString(out, android.util.Base64.NO_WRAP))
+                        put("size", size)
+                        put("truncated", size > maxBytes.toLong())
+                    })
+                }
+            } catch (e: Exception) {
+                call.reject(e.message ?: "read failed", e)
+            }
+        }
+    }
+
+    /**
      * JS notifies us when a local-shell tab becomes the active focus
      * (or stops being so). When active, we register a sender closure
      * with InputRouter so the WebView's native InputConnection wrapper

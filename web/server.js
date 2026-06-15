@@ -254,6 +254,50 @@ app.get('/api/fs/list', (req, res) => {
   }
 });
 
+// ---- file read (for the read-only preview) --------------------------
+//
+// Reads up to `max` bytes of a file and returns it base64-encoded so
+// the client can preview markdown / images / text. Capped (default
+// 1 MB, hard ceiling 16 MB) so a giant log or binary can't blow up the
+// response or the client WebView. Auth-gated like the rest of /api.
+// No path sandbox: this is the user's own single-account server and
+// the working-dir picker already exposes the whole FS — same trust
+// boundary as /api/fs/list.
+app.get('/api/fs/read', (req, res) => {
+  const filePath = (req.query.path || '').toString();
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  const HARD_MAX = 16 * 1024 * 1024;
+  let max = parseInt((req.query.max || '').toString(), 10);
+  if (!Number.isFinite(max) || max <= 0) max = 1024 * 1024;
+  max = Math.min(max, HARD_MAX);
+  try {
+    const resolved = path.resolve(filePath);
+    const st = fs.statSync(resolved);
+    if (!st.isFile()) return res.status(400).json({ error: 'not a regular file' });
+    const size = st.size;
+    const toRead = Math.min(size, max);
+    const fd = fs.openSync(resolved, 'r');
+    try {
+      const buf = Buffer.alloc(toRead);
+      let read = 0;
+      while (read < toRead) {
+        const n = fs.readSync(fd, buf, read, toRead - read, read);
+        if (n <= 0) break;
+        read += n;
+      }
+      res.json({
+        base64: buf.subarray(0, read).toString('base64'),
+        size,
+        truncated: size > max,
+      });
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    res.status(400).json({ error: String(err && err.message || err) });
+  }
+});
+
 // ---- tmux session discovery -----------------------------------------
 //
 // Persistent sessions run inside a `cs-<id>` tmux session on this host

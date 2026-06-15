@@ -195,6 +195,20 @@
       return resp.json();
     },
 
+    // Read a file on the agent host for preview. Resolves { base64,
+    // size, truncated } (server caps the byte count). Keyed off the
+    // tab's stored agentUrl/session so the caller passes just the tab.
+    async fsRead(tabId, remotePath, maxBytes) {
+      const t = tabs.get(tabId);
+      if (!t) throw new Error('no remote session for tab');
+      const c = conns.get(t.agentUrl);
+      const password = (c && c.password) || '';
+      return this.apiGet(t.agentUrl, password, '/api/fs/read', {
+        path: remotePath,
+        max: String(maxBytes || (1024 * 1024)),
+      });
+    },
+
     async apiPost(agentUrl, password, pathname, body) {
       const token = await login(agentUrl, password);
       const base = httpBaseFor(agentUrl);

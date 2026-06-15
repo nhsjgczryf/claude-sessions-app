@@ -7,11 +7,21 @@
   <title>Claude Sessions</title>
 
   <link rel="stylesheet" href="vendor/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="vendor/katex/katex.min.css" />
   <link rel="stylesheet" href="style.css" />
   <script src="vendor/xterm/lib/xterm.js"></script>
   <script src="vendor/xterm/lib/addon-fit.js"></script>
   <script src="vendor/xterm/lib/addon-web-links.js"></script>
   <script src="vendor/xterm/lib/addon-unicode11.js"></script>
+  <!-- File-preview renderers (vendored, offline). marked → HTML,
+       DOMPurify sanitizes it (the preview shares the WebView with the
+       Capacitor native bridge — unsanitized markdown would be an
+       injection path to the plugins), KaTeX renders LaTeX. All optional:
+       renderer.js feature-detects each and degrades to plain text. -->
+  <script src="vendor/marked/marked.min.js"></script>
+  <script src="vendor/dompurify/purify.min.js"></script>
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="vendor/katex/auto-render.min.js"></script>
 </head>
 <body>
   <div id="sidebar">
@@ -242,6 +252,22 @@
   </div>
 
   <input id="image-file-input" type="file" accept="image/*" hidden />
+
+  <!-- Read-only file preview. Opened from the terminal selection
+       toolbar (select a path → 预览). Renders markdown (+LaTeX),
+       images, and plain text; read over whichever transport the active
+       tab uses (SFTP / agent /api/fs/read / local rootfs). -->
+  <div id="file-preview" class="hidden">
+    <div class="file-preview-box">
+      <div class="file-preview-header">
+        <span id="file-preview-path" class="file-preview-path"></span>
+        <button type="button" id="file-preview-copy" title="Copy file contents">Copy</button>
+        <button type="button" id="file-preview-close" title="Close">&times;</button>
+      </div>
+      <div id="file-preview-banner" class="file-preview-banner hidden"></div>
+      <div id="file-preview-body" class="file-preview-body"></div>
+    </div>
+  </div>
 
   <div id="context-menu" class="hidden"></div>
 

@@ -99,6 +99,13 @@
       return SSH.listActive();
     },
 
+    // Read a remote file for preview. Resolves { base64, size,
+    // truncated }; native side caps at maxBytes so big files don't OOM.
+    async sftpGet(tabId, remotePath, maxBytes) {
+      if (!SSH) { notSupported('sftpGet'); throw new Error('SSH plugin unavailable'); }
+      return SSH.sftpGet({ tabId, remotePath, maxBytes: maxBytes || (1024 * 1024) });
+    },
+
     onData(cb)    { dataListeners.add(cb);    return () => dataListeners.delete(cb); },
     onExit(cb)    { exitListeners.add(cb);    return () => exitListeners.delete(cb); },
     onWarning(cb) { warningListeners.add(cb); return () => warningListeners.delete(cb); },
