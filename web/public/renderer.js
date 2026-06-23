@@ -306,6 +306,19 @@ function promptRecreateAfterWsLoss(tab) {
   });
 }
 
+// Fit + push the current size to the server PTY. Needed right after the
+// server confirms ready/reattached: any onResize fired while alive was
+// still false (initial fit, switchToTab) was dropped, so the PTY may
+// still be at its spawn-time size (classically 80×24 — content then
+// draws in a small top-left box of a big window).
+function syncTermSize(tab) {
+  try {
+    tab.fitAddon.fit();
+    const { cols, rows } = tab.term;
+    wsSend({ type: 'resize', tabId: tab.id, cols, rows });
+  } catch (_) {}
+}
+
 function openWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // Auth comes from the HttpOnly session cookie sent automatically on
@@ -353,6 +366,7 @@ function openWebSocket() {
     else if (msg.type === 'ready') {
       // Fresh server-side PTY spawned for our tabId.
       tab.alive = true;
+      syncTermSize(tab);
       renderTabs();
       renderSessionList();
     } else if (msg.type === 'reattached') {
@@ -361,6 +375,7 @@ function openWebSocket() {
       // a separate 'data' frame; if it was exited a follow-up 'exit'
       // frame triggers the R-prompt path.
       tab.alive = !msg.exited;
+      if (tab.alive) syncTermSize(tab);
       tab.term.write(`\x1b[90m[reattached]\x1b[0m `);
       renderTabs();
       renderSessionList();
@@ -760,10 +775,13 @@ function launchSession(sessionId, opts) {
   }
 
   saveTabsState();
-  attachToServer(tab, session);
-
   renderTabs();
+  // Activate BEFORE the 'create' goes out: the container is display:none
+  // until it has .active, so fit() above was a no-op and the term is
+  // still at xterm's default 80×24. switchToTab makes it visible and
+  // refits, so attachToServer below reads the real cols/rows.
   switchToTab(tabId);
+  attachToServer(tab, session);
   renderSessionList();
 }
 
@@ -1039,6 +1057,12 @@ function showTerminalContextMenu(x, y, tab) {
     }});
     items.push({ label: '预览文件', action: () => openPreviewForSelection(sel) });
   }
+  if (window.TerminalSearch && tab.searchAddon) {
+    const q = term.hasSelection()
+      ? term.getSelection().replace(/\r?\n/g, ' ').trim().slice(0, 200) : '';
+    items.push({ label: '查找 (Ctrl+F)', action: () =>
+      window.TerminalSearch.open({ term, addon: tab.searchAddon, query: q }) });
+  }
   items.push({ label: 'Paste', action: () => {
     navigator.clipboard.readText().then((t) => { if (t) bracketedPaste(tab.id, t); }).catch(() => {});
   }});
@@ -1259,7 +1283,7 @@ $('#btn-collapse').addEventListener('click', () => setSidebarCollapsed(true));
 $('#btn-expand').addEventListener('click', () => setSidebarCollapsed(false));
 
 // ============================================================================
-// PWA: service worker + install prompt
+// PWA: service worker
 // ============================================================================
 
 if ('serviceWorker' in navigator) {
@@ -1272,41 +1296,10 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-let _deferredInstall = null;
+// Suppress the browser's PWA install prompt — we don't surface an
+// "Install app" chip. (Users can still install via the browser menu.)
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
-  _deferredInstall = e;
-  ensureInstallChip();
-});
-
-function ensureInstallChip() {
-  if (!_deferredInstall) return;
-  let chip = $('#install-chip');
-  if (!chip) {
-    chip = document.createElement('button');
-    chip.id = 'install-chip';
-    chip.type = 'button';
-    chip.textContent = 'Install app';
-    chip.addEventListener('click', async () => {
-      const ev = _deferredInstall;
-      if (!ev) return;
-      _deferredInstall = null;
-      chip.classList.add('hidden');
-      try {
-        ev.prompt();
-        await ev.userChoice;
-      } catch (_) {}
-    });
-    document.body.appendChild(chip);
-  } else {
-    chip.classList.remove('hidden');
-  }
-}
-
-window.addEventListener('appinstalled', () => {
-  _deferredInstall = null;
-  const chip = $('#install-chip');
-  if (chip) chip.classList.add('hidden');
 });
 
 // ============================================================================

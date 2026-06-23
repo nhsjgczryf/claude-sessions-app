@@ -687,6 +687,12 @@ function showTerminalContextMenu(x, y, tabId) {
     }});
     items.push({ label: '预览文件', action: () => openPreviewForSelection(tab, sel) });
   }
+  if (window.TerminalSearch && tab.searchAddon) {
+    const q = term.hasSelection()
+      ? term.getSelection().replace(/\r?\n/g, ' ').trim().slice(0, 200) : '';
+    items.push({ label: '查找 (Ctrl+F)', action: () =>
+      window.TerminalSearch.open({ term, addon: tab.searchAddon, query: q }) });
+  }
   items.push({ label: 'Paste', action: () => {
     const text = clipboard.readText(); if (text) bracketedPaste(tabId, text);
   }});
