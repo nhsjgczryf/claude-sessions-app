@@ -27,6 +27,19 @@
   let resultsDisposable = null;
   const opts = { caseSensitive: false, regex: false, wholeWord: false };
 
+  // Passing `decorations` per-search is what makes addon-search highlight
+  // ALL matches AND count them — onDidChangeResults (the counter source)
+  // only fires when decorations are enabled. The constructor does NOT
+  // accept these (it only takes { highlightLimit }), so they must live in
+  // the findNext/findPrevious options. matchOverviewRuler and
+  // activeMatchColorOverviewRuler are required by ISearchDecorationOptions.
+  const DECORATIONS = {
+    matchBackground: 'rgba(249, 226, 175, 0.35)',
+    activeMatchBackground: '#fab387',
+    matchOverviewRuler: '#f9e2af',
+    activeMatchColorOverviewRuler: '#fab387',
+  };
+
   function injectStyle() {
     if (document.getElementById('terminal-search-style')) return;
     const css = `
@@ -129,6 +142,7 @@
       regex: opts.regex,
       wholeWord: opts.wholeWord,
       incremental: !!incremental,
+      decorations: DECORATIONS,
     };
   }
 
