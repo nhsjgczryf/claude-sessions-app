@@ -1134,3 +1134,23 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   border-color: var(--accent);
   color: var(--accent);
 }
+#sel-toolbar button[data-sel="find"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Tab-bar trailing buttons (Find, future others). Sit flush-right and
+ * stay visible while #tabs scrolls horizontally beside them. */
+.tab-bar-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 6px;
+  min-width: 36px;
+  min-height: 30px;
+  font-size: 14px;
+  background: var(--input-bg);
+}
+.tab-bar-btn.hidden { display: none; }
+@media (max-width: 600px), (pointer: coarse) {
+  .tab-bar-btn { min-width: 40px; min-height: 36px; font-size: 16px; }
+}

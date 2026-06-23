@@ -13,6 +13,7 @@
   <script src="vendor/xterm/lib/addon-fit.js"></script>
   <script src="vendor/xterm/lib/addon-web-links.js"></script>
   <script src="vendor/xterm/lib/addon-unicode11.js"></script>
+  <script src="vendor/xterm/lib/addon-search.js"></script>
   <!-- File-preview renderers (vendored, offline). marked → HTML,
        DOMPurify sanitizes it (the preview shares the WebView with the
        Capacitor native bridge — unsanitized markdown would be an
@@ -45,6 +46,11 @@
   <div id="main">
     <div id="tab-bar">
       <div id="tabs"></div>
+      <!-- Always-visible Search trigger so phone users (who can't tap
+           Ctrl+F) can open the in-buffer search bar without first
+           long-pressing into selection mode. Hardware-keyboard Ctrl+F
+           also works via terminal-search.js. -->
+      <button id="btn-find" class="icon-btn tab-bar-btn hidden" title="查找 (Ctrl+F)">&#x1F50D;</button>
     </div>
     <div id="terminal-area">
       <div id="welcome">
@@ -264,6 +270,7 @@
   <script src="ws-bridge.js"></script>
   <script src="compose-input-bridge.js"></script>
   <script src="file-preview.js"></script>
+  <script src="terminal-search.js"></script>
   <script src="session-builder.js"></script>
   <script src="renderer.js"></script>
 </body>

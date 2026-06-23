@@ -63,6 +63,7 @@ function vendorXterm() {
     ['@xterm/addon-fit/lib/addon-fit.js',                    path.join(libDir, 'addon-fit.js')],
     ['@xterm/addon-web-links/lib/addon-web-links.js',        path.join(libDir, 'addon-web-links.js')],
     ['@xterm/addon-unicode11/lib/addon-unicode11.js',        path.join(libDir, 'addon-unicode11.js')],
+    ['@xterm/addon-search/lib/addon-search.js',              path.join(libDir, 'addon-search.js')],
   ];
   for (const [from, to] of mappings) {
     const abs = path.join(ROOT, 'node_modules', from);

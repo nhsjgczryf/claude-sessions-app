@@ -3,6 +3,9 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { Unicode11Addon } = require('@xterm/addon-unicode11');
+let SearchAddon = null;
+try { SearchAddon = require('@xterm/addon-search').SearchAddon; }
+catch (e) { console.warn('[search] @xterm/addon-search not installed:', e && e.message); }
 
 // Populate the globals the shared file-preview.js module reads. Under
 // Electron's nodeIntegration a UMD <script> would attach to
@@ -423,6 +426,20 @@ function launchSession(sessionId) {
   const unicodeAddon = new Unicode11Addon();
   term.loadAddon(unicodeAddon);
   term.unicode.activeVersion = '11';
+  let searchAddon = null;
+  if (SearchAddon) {
+    try {
+      searchAddon = new SearchAddon({
+        decorations: {
+          matchBackground: 'rgba(249, 226, 175, 0.35)',
+          activeMatchBackground: '#fab387',
+          matchOverviewRuler: '#f9e2af',
+          activeMatchColorOverviewRuler: '#fab387',
+        },
+      });
+      term.loadAddon(searchAddon);
+    } catch (_) { searchAddon = null; }
+  }
 
   term.open(container);
   fitAddon.fit();
@@ -433,6 +450,7 @@ function launchSession(sessionId) {
     sessionName: displayName,
     term,
     fitAddon,
+    searchAddon,
     container,
     alive: true,
   };
@@ -461,6 +479,7 @@ function launchSession(sessionId) {
 }
 
 function switchToTab(tabId) {
+  if (window.TerminalSearch) window.TerminalSearch.close();
   activeTabId = tabId;
   for (const t of tabs) {
     t.container.classList.toggle('active', t.id === tabId);
@@ -481,6 +500,7 @@ function switchToTab(tabId) {
 function closeTab(tabId) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx < 0) return;
+  if (activeTabId === tabId && window.TerminalSearch) window.TerminalSearch.close();
   const tab = tabs[idx];
   if (tab.alive) ipcRenderer.invoke('kill-terminal', tabId);
   try { tab.term.dispose(); } catch (_) {}
@@ -929,6 +949,15 @@ try {
 
 $('#btn-collapse').addEventListener('click', () => setSidebarCollapsed(true));
 $('#btn-expand').addEventListener('click', () => setSidebarCollapsed(false));
+
+// Ctrl+F / Cmd+F → terminal search bar (terminal-search.js handles the
+// UI; we just supply the active terminal + its SearchAddon).
+if (window.TerminalSearch) {
+  window.TerminalSearch.installGlobalShortcut(() => {
+    const t = tabs.find((x) => x.id === activeTabId);
+    return t && t.searchAddon ? { term: t.term, addon: t.searchAddon } : null;
+  });
+}
 
 // Initial load
 loadSessionsFromDisk();

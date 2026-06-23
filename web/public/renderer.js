@@ -7,6 +7,7 @@
 
 const Terminal = window.Terminal;
 const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
+const SearchAddon = window.SearchAddon && window.SearchAddon.SearchAddon;
 const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
 const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
 
@@ -714,12 +715,26 @@ function launchSession(sessionId, opts) {
   const u11 = new Unicode11Addon();
   term.loadAddon(u11);
   term.unicode.activeVersion = '11';
+  let searchAddon = null;
+  if (SearchAddon) {
+    try {
+      searchAddon = new SearchAddon({
+        decorations: {
+          matchBackground: 'rgba(249, 226, 175, 0.35)',
+          activeMatchBackground: '#fab387',
+          matchOverviewRuler: '#f9e2af',
+          activeMatchColorOverviewRuler: '#fab387',
+        },
+      });
+      term.loadAddon(searchAddon);
+    } catch (_) { searchAddon = null; }
+  }
   term.open(container);
   fitAddon.fit();
 
   const tab = {
     id: tabId, sessionId, sessionName: displayName, kind: 'terminal',
-    term, fitAddon, container,
+    term, fitAddon, searchAddon, container,
     // Until the server confirms reattach/spawn we're not alive — keeps
     // stray onData callbacks (e.g. xterm firing for the initial focus
     // event) from leaking input.
@@ -828,6 +843,7 @@ function launchWebSession(session, opts) {
 }
 
 function switchToTab(tabId) {
+  if (window.TerminalSearch) window.TerminalSearch.close();
   activeTabId = tabId;
   for (const t of tabs) t.container.classList.toggle('active', t.id === tabId);
   const tab = tabs.find((t) => t.id === tabId);
@@ -849,6 +865,7 @@ function switchToTab(tabId) {
 function closeTab(tabId) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx < 0) return;
+  if (activeTabId === tabId && window.TerminalSearch) window.TerminalSearch.close();
   const tab = tabs[idx];
   if (tab.kind === 'terminal') {
     // Always send kill on explicit close — even if the local tab is in
@@ -1513,6 +1530,15 @@ function pickImageFromGallery() {
     pickImageFromGallery();
   });
 })();
+
+// Ctrl+F / Cmd+F → terminal search bar (terminal-search.js handles the
+// UI; we just supply the currently active terminal + its SearchAddon).
+if (window.TerminalSearch) {
+  window.TerminalSearch.installGlobalShortcut(() => {
+    const t = tabs.find((x) => x.id === activeTabId);
+    return t && t.searchAddon && t.kind === 'terminal' ? { term: t.term, addon: t.searchAddon } : null;
+  });
+}
 
 // Boot
 attemptStart();

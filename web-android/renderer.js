@@ -21,6 +21,7 @@ const Terminal = window.Terminal;
 const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
 const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
 const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
+const SearchAddon = window.SearchAddon && window.SearchAddon.SearchAddon;
 
 // True when the native Android compose bar (ComposeInputPlugin) is
 // available — then we type into a real EditText instead of the
@@ -759,6 +760,20 @@ async function launchSession(sessionId, opts) {
   const u11 = new Unicode11Addon();
   term.loadAddon(u11);
   term.unicode.activeVersion = '11';
+  let searchAddon = null;
+  if (SearchAddon) {
+    try {
+      searchAddon = new SearchAddon({
+        decorations: {
+          matchBackground: 'rgba(249, 226, 175, 0.35)',
+          activeMatchBackground: '#fab387',
+          matchOverviewRuler: '#f9e2af',
+          activeMatchColorOverviewRuler: '#fab387',
+        },
+      });
+      term.loadAddon(searchAddon);
+    } catch (_) { searchAddon = null; }
+  }
   term.open(container);
   fitAddon.fit();
 
@@ -769,7 +784,7 @@ async function launchSession(sessionId, opts) {
     // (cs-XXX); the remote attemptConnect uses it to reattach to that
     // exact server-side tmux instead of keying on the tab id.
     attachTmux: (opts && opts.attachTmux) || null,
-    term, fitAddon, container, alive: false,
+    term, fitAddon, searchAddon, container, alive: false,
   };
   tabs.push(tab);
   attachTerminalTouch(tab);
@@ -1039,6 +1054,7 @@ function promptReconnect(tab) {
 
 function switchToTab(tabId) {
   exitSelectMode();
+  if (window.TerminalSearch) window.TerminalSearch.close();
   activeTabId = tabId;
   for (const t of tabs) t.container.classList.toggle('active', t.id === tabId);
   const tab = tabs.find((t) => t.id === tabId);
@@ -1053,6 +1069,7 @@ function switchToTab(tabId) {
     } catch (_) {}
   }
   $('#welcome').classList.toggle('hidden', tabs.length > 0);
+  const bf = $('#btn-find'); if (bf) bf.classList.toggle('hidden', tabs.length === 0);
   renderTabs();
 }
 
@@ -1060,6 +1077,7 @@ function closeTab(tabId, opts) {
   const idx = tabs.findIndex((t) => t.id === tabId);
   if (idx < 0) return;
   if (selectingTabId === tabId) exitSelectMode();
+  if (activeTabId === tabId && window.TerminalSearch) window.TerminalSearch.close();
   const tab = tabs[idx];
   if (!(opts && opts.skipSshClose)) {
     bridgeFor(tab).close(tabId).catch(() => {});
@@ -1080,6 +1098,7 @@ function closeTab(tabId, opts) {
   }
   saveTabsState();
   $('#welcome').classList.toggle('hidden', tabs.length > 0);
+  const bf = $('#btn-find'); if (bf) bf.classList.toggle('hidden', tabs.length === 0);
   renderTabs();
   renderSessionList();
   updateKeybarVisibility();
@@ -1382,6 +1401,7 @@ function selToolbarEl() {
     '<button type="button" data-sel="all">全选</button>' +
     '<button type="button" data-sel="screen">整屏</button>' +
     '<button type="button" data-sel="preview">预览</button>' +
+    '<button type="button" data-sel="find">查找</button>' +
     '<button type="button" data-sel="paste">粘贴</button>' +
     '<button type="button" data-sel="copy">复制</button>' +
     '<button type="button" data-sel="cancel">取消</button>';
@@ -1408,6 +1428,16 @@ function selToolbarEl() {
         const id = tab.id;
         exitSelectMode();
         openFilePreview(id, sel);
+        return;
+      }
+      case 'find': {
+        if (!window.TerminalSearch || !tab.searchAddon) {
+          notify('搜索功能未加载', 'error'); return;
+        }
+        const sel = (tab.term.getSelection() || '').replace(/\r?\n/g, ' ').trim().slice(0, 200);
+        const t = tab.term, addon = tab.searchAddon;
+        exitSelectMode();
+        window.TerminalSearch.open({ term: t, addon, query: sel });
         return;
       }
       case 'paste':
@@ -2329,6 +2359,29 @@ $('#image-file-input').addEventListener('change', (e) => {
   if (!file || !activeTabId) return;
   uploadImageBlob(activeTabId, file);
 });
+
+// ----------------------------------------------------------------------------
+// Terminal search (Ctrl+F + the 🔍 button in the tab bar + 查找 in the
+// selection toolbar). The bar UI + Ctrl+F handler live in
+// terminal-search.js (shared across all three frontends); here we just
+// hand it the active tab's term + SearchAddon on demand.
+function activeSearchHandle() {
+  const t = tabs.find((x) => x.id === activeTabId);
+  if (!t || !t.searchAddon) return null;
+  return { term: t.term, addon: t.searchAddon };
+}
+if (window.TerminalSearch) {
+  window.TerminalSearch.installGlobalShortcut(activeSearchHandle);
+}
+const btnFind = $('#btn-find');
+if (btnFind) {
+  btnFind.addEventListener('click', () => {
+    const h = activeSearchHandle();
+    if (!h) { notify('没有活动会话', 'info'); return; }
+    if (!window.TerminalSearch) { notify('搜索功能未加载', 'error'); return; }
+    window.TerminalSearch.open(h);
+  });
+}
 
 // ============================================================================
 // Boot
