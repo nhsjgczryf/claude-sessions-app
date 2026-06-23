@@ -4,11 +4,17 @@
 // during transient network loss — though anything terminal-related is
 // inherently online-only (it depends on the WebSocket and the API).
 
-const CACHE = 'claude-sessions-shell-v1';
+// Bump this version string on every static-asset change. The activate
+// handler deletes any cache whose key != CACHE, so bumping forces every
+// returning visitor to re-fetch the shell (scripts are cache-first and
+// would otherwise serve stale JS forever).
+const CACHE = 'claude-sessions-shell-v2';
 const SHELL = [
   '/',
   '/style.css',
   '/renderer.js',
+  '/terminal-search.js',
+  '/file-preview.js',
   '/manifest.webmanifest',
   '/icon.svg',
   '/vendor/xterm/xterm/css/xterm.css',
@@ -16,6 +22,7 @@ const SHELL = [
   '/vendor/xterm/addon-fit/lib/addon-fit.js',
   '/vendor/xterm/addon-web-links/lib/addon-web-links.js',
   '/vendor/xterm/addon-unicode11/lib/addon-unicode11.js',
+  '/vendor/xterm/addon-search/lib/addon-search.js',
 ];
 
 self.addEventListener('install', (event) => {
