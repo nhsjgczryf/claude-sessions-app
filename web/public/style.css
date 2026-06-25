@@ -275,6 +275,28 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   scrollbar-width: thin;
 }
 
+#tab-bar-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 6px 0 4px;
+  height: 100%;
+  gap: 1px;
+}
+.tab-add-btn {
+  background: transparent;
+  color: var(--fg-dim);
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.tab-add-btn:hover { background: var(--bg-hover); color: var(--fg); }
+.tab-add-caret { font-size: 11px; padding: 4px 4px; }
+
 .tab {
   display: flex;
   align-items: center;
@@ -544,6 +566,7 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 .menu-item:hover { background: var(--bg-hover); }
 .menu-item.danger:hover { background: var(--red); color: white; }
+.menu-item.dim { color: var(--fg-dim); pointer-events: none; opacity: 0.6; }
 .menu-sep {
   height: 1px;
   background: var(--border);

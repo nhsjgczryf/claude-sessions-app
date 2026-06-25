@@ -81,6 +81,25 @@ function sessionInstanceCount(sessionId) {
   return tabs.filter((t) => t.sessionId === sessionId).length;
 }
 
+const LS_LAST_LAUNCHED = 'claude-sessions.lastLaunchedId';
+
+function shortDir(dir) {
+  if (!dir) return '';
+  const norm = dir.replace(/\\/g, '/').replace(/\/+$/, '');
+  const parts = norm.split('/');
+  return parts[parts.length - 1] || norm;
+}
+
+function pickDefaultSessionForNewTab() {
+  const active = tabs.find((t) => t.id === activeTabId);
+  if (active && sessions.find((s) => s.id === active.sessionId)) return active.sessionId;
+  try {
+    const last = localStorage.getItem(LS_LAST_LAUNCHED);
+    if (last && sessions.find((s) => s.id === last)) return last;
+  } catch (_) {}
+  return sessions[0] ? sessions[0].id : null;
+}
+
 // ============================================================================
 // Session persistence
 // ============================================================================
@@ -394,13 +413,21 @@ function deleteSession(sessionId) {
 // Terminal / Tab management
 // ============================================================================
 
-function launchSession(sessionId) {
-  const session = sessions.find((s) => s.id === sessionId);
-  if (!session) return;
+function launchSession(sessionId, opts) {
+  const baseSession = sessions.find((s) => s.id === sessionId);
+  if (!baseSession) return;
+
+  const overrideDir = opts && opts.workingDirOverride ? String(opts.workingDirOverride).trim() : '';
+  const session = overrideDir
+    ? { ...baseSession, working_dir: overrideDir }
+    : baseSession;
 
   const tabId = `tab-${++tabCounter}`;
   const existing = sessionInstanceCount(sessionId);
-  const displayName = existing === 0 ? session.name : `${session.name} #${existing + 1}`;
+  const baseName = existing === 0 ? baseSession.name : `${baseSession.name} #${existing + 1}`;
+  const displayName = overrideDir ? `${baseName} · ${shortDir(overrideDir)}` : baseName;
+
+  try { localStorage.setItem(LS_LAST_LAUNCHED, sessionId); } catch (_) {}
 
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -869,6 +896,101 @@ $('#btn-paste-img').addEventListener('click', () => pasteImageToActiveTab());
 $('#editor-close').addEventListener('click', closeEditor);
 $('#editor-cancel').addEventListener('click', closeEditor);
 $('#editor-form').addEventListener('submit', saveEditor);
+
+// Tab bar "+" — VSCode-style new tab. Reuses the active tab's session
+// (or the last-launched / first session if none is active). The caret
+// next to it opens a menu to pick a different session or override cwd.
+function newTabReuseCurrent() {
+  if (!sessions.length) {
+    openEditor(null);
+    return;
+  }
+  const id = pickDefaultSessionForNewTab();
+  if (id) launchSession(id);
+  else notify('No session to reuse — create one first', 'info');
+}
+
+function openNewTabMenu(anchor) {
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+
+  const active = tabs.find((t) => t.id === activeTabId);
+  const reuseId = pickDefaultSessionForNewTab();
+
+  const items = [];
+  if (sessions.length === 0) {
+    items.push({ label: 'Create your first session…', action: () => openEditor(null) });
+  } else {
+    items.push({
+      label: `New tab (reuse ${active ? 'current' : 'last'})`,
+      dim: !reuseId,
+      action: () => reuseId && launchSession(reuseId),
+    });
+    items.push({
+      label: 'New tab in custom dir…',
+      dim: !reuseId,
+      action: () => reuseId && promptCustomDirAndLaunch(reuseId),
+    });
+    items.push({ sep: true });
+    for (const s of sessions) {
+      items.push({
+        label: s.name + (s.working_dir ? `  ⟶  ${shortDir(s.working_dir)}` : ''),
+        action: () => launchSession(s.id),
+      });
+    }
+    items.push({ sep: true });
+    items.push({ label: '+ New session…', action: () => openEditor(null) });
+  }
+
+  for (const item of items) {
+    if (item.sep) {
+      const s = document.createElement('div');
+      s.className = 'menu-sep';
+      menu.appendChild(s);
+      continue;
+    }
+    const mi = document.createElement('div');
+    mi.className = 'menu-item' + (item.dim ? ' dim' : '');
+    mi.textContent = item.label;
+    mi.addEventListener('click', () => {
+      menu.classList.add('hidden');
+      item.action();
+    });
+    menu.appendChild(mi);
+  }
+
+  // Position above-right of the anchor, flipping if it'd overflow.
+  menu.classList.remove('hidden');
+  const rect = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = rect.right - mw;
+  if (left < 4) left = 4;
+  let top = rect.bottom + 2;
+  if (top + mh > window.innerHeight - 4) top = rect.top - mh - 2;
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+function promptCustomDirAndLaunch(sessionId) {
+  const base = sessions.find((s) => s.id === sessionId);
+  if (!base) return;
+  const dir = window.prompt(
+    `Working directory for new "${base.name}" tab:`,
+    base.working_dir || ''
+  );
+  if (dir == null) return;
+  launchSession(sessionId, { workingDirOverride: dir.trim() || undefined });
+}
+
+$('#btn-tab-add').addEventListener('click', (e) => {
+  e.stopPropagation();
+  newTabReuseCurrent();
+});
+$('#btn-tab-add-menu').addEventListener('click', (e) => {
+  e.stopPropagation();
+  openNewTabMenu(e.currentTarget);
+});
 document.querySelectorAll('#editor-form input[name="type"]').forEach((el) => {
   el.addEventListener('change', updateTypeVisibility);
 });
