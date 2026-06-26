@@ -975,20 +975,30 @@ function openNewTabMenu(anchor) {
 async function promptCustomDirAndLaunch(sessionId) {
   const base = sessions.find((s) => s.id === sessionId);
   if (!base) return;
-  // window.prompt() is disabled in Electron — go through a native dialog
-  // via IPC instead. SSH sessions still get a typed-path prompt fallback
-  // because the picker only browses the local fs, not the remote host.
+  // SSH: typed path (the native picker only browses the LOCAL fs, no
+  // remote-fs traversal yet). Local: native dialog via IPC. window.prompt()
+  // is disabled in Electron, so missing pickDirectory must surface as a
+  // notification instead of silently no-op-ing.
   let dir;
-  if (base.type === 'local' && window.api && window.api.pickDirectory) {
-    dir = await window.api.pickDirectory(base.working_dir || '');
-    if (dir == null) return;
-  } else {
+  if (base.type === 'ssh') {
     dir = window.prompt(
-      `Working directory for new "${base.name}" tab:`,
+      `Working directory for new "${base.name}" tab (remote path):`,
       base.working_dir || ''
     );
     if (dir == null) return;
     dir = dir.trim();
+  } else {
+    if (!window.api || !window.api.pickDirectory) {
+      notify('Folder picker not available — quit and relaunch the app to load the update.', 'error');
+      return;
+    }
+    try {
+      dir = await window.api.pickDirectory(base.working_dir || '');
+    } catch (err) {
+      notify(`Folder picker failed: ${err && err.message}`, 'error');
+      return;
+    }
+    if (dir == null) return;
   }
   launchSession(sessionId, { workingDirOverride: dir || undefined });
 }
