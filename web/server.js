@@ -425,7 +425,16 @@ function makeProxy(sessionId, upstream) {
   return createProxyMiddleware({
     target: upstream,
     changeOrigin: true,
-    ws: true,
+    // IMPORTANT: keep ws:false here. With ws:true, http-proxy-middleware
+    // auto-subscribes its OWN `server.on('upgrade')` handler on the first
+    // HTTP request — and since we set no pathFilter, its default filter
+    // ('/') matches EVERY upgrade, including our terminal WS at `/`. That
+    // handler then hijacks the already-upgraded terminal socket and tries
+    // to proxy it to the web upstream, breaking ALL terminal sessions
+    // (client sees an immediate 1006). WS upgrades for /p/<id> are routed
+    // explicitly via proxy.upgrade() in the server 'upgrade' handler below,
+    // so we don't need (or want) the auto-subscription.
+    ws: false,
     pathRewrite: { [`^/p/${sessionId}`]: '' },
     cookiePathRewrite: { '*': `/p/${sessionId}` },
     cookieDomainRewrite: '',
