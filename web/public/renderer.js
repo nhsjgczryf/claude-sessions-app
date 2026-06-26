@@ -1311,15 +1311,154 @@ function openNewTabMenu(anchor) {
   menu.style.top = top + 'px';
 }
 
-function promptCustomDirAndLaunch(sessionId) {
+async function promptCustomDirAndLaunch(sessionId) {
   const base = sessions.find((s) => s.id === sessionId);
   if (!base) return;
-  const dir = window.prompt(
-    `Working directory for new "${base.name}" tab:`,
-    base.working_dir || ''
-  );
+  const dir = await pickDirectory(base.working_dir || '', base.name);
   if (dir == null) return;
   launchSession(sessionId, { workingDirOverride: dir.trim() || undefined });
+}
+
+// ---------------------------------------------------------------------------
+// Directory picker — a browsable folder chooser backed by /api/fs/list.
+// Returns a Promise that resolves to the chosen absolute path, or null if
+// the user cancels. Navigate the server's filesystem one level at a time
+// (tap a folder to descend, ⬆ for the parent, ⌂ for home) or type/paste a
+// path directly. "Use this folder" picks whatever directory is open now.
+// ---------------------------------------------------------------------------
+let dirPickerEl = null;
+
+function buildDirPicker() {
+  const overlay = document.createElement('div');
+  overlay.id = 'dir-picker-overlay';
+  overlay.className = 'hidden';
+  overlay.innerHTML =
+    '<div class="dir-picker">' +
+      '<div class="editor-header">' +
+        '<span class="dp-title">Choose folder</span>' +
+        '<button type="button" class="dp-close" title="Close (Esc)">&times;</button>' +
+      '</div>' +
+      '<div class="dp-pathrow">' +
+        '<button type="button" class="dp-up" title="Parent folder">&#x2B06;</button>' +
+        '<input type="text" class="dp-path" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Folder path" />' +
+        '<button type="button" class="dp-home" title="Home folder">&#x2302;</button>' +
+      '</div>' +
+      '<div class="dp-banner hidden"></div>' +
+      '<div class="dp-list"></div>' +
+      '<div class="editor-actions">' +
+        '<button type="button" class="dp-cancel">Cancel</button>' +
+        '<button type="button" class="dp-use">Use this folder</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+// Server FS is POSIX here; the endpoint re-resolves with path.resolve so a
+// trailing-slash-safe join is all we need.
+function joinDirPath(base, name) {
+  if (!base) return name;
+  return base.endsWith('/') ? base + name : base + '/' + name;
+}
+
+function pickDirectory(startPath, label) {
+  const overlay = dirPickerEl || (dirPickerEl = buildDirPicker());
+  const titleEl = overlay.querySelector('.dp-title');
+  const pathInput = overlay.querySelector('.dp-path');
+  const listEl = overlay.querySelector('.dp-list');
+  const bannerEl = overlay.querySelector('.dp-banner');
+  const upBtn = overlay.querySelector('.dp-up');
+  const homeBtn = overlay.querySelector('.dp-home');
+  const useBtn = overlay.querySelector('.dp-use');
+  const cancelBtn = overlay.querySelector('.dp-cancel');
+  const closeBtn = overlay.querySelector('.dp-close');
+
+  titleEl.textContent = label ? `Choose folder — ${label}` : 'Choose folder';
+
+  let current = null;   // resolved abs path currently shown
+  let parent = null;    // parent of `current`, or null at the FS root
+
+  return new Promise((resolve) => {
+    let settled = false;
+    function done(value) {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', onKey);
+      overlay.removeEventListener('click', onOverlayClick);
+      pathInput.removeEventListener('keydown', onPathKey);
+      upBtn.removeEventListener('click', onUp);
+      homeBtn.removeEventListener('click', onHome);
+      useBtn.removeEventListener('click', onUse);
+      cancelBtn.removeEventListener('click', onCancel);
+      closeBtn.removeEventListener('click', onCancel);
+      overlay.classList.add('hidden');
+      resolve(value);
+    }
+
+    function showBanner(text) {
+      bannerEl.textContent = text || '';
+      bannerEl.classList.toggle('hidden', !text);
+    }
+
+    async function navigate(p) {
+      showBanner('');
+      listEl.classList.add('dp-loading');
+      try {
+        const qs = (p === '' || p == null) ? '' : '?path=' + encodeURIComponent(p);
+        const data = await api('GET', '/api/fs/list' + qs);
+        current = data.path;
+        parent = data.parent;
+        pathInput.value = current;
+        upBtn.disabled = !parent;
+        renderList(data.dirs || []);
+      } catch (err) {
+        showBanner(err && err.message ? err.message : 'Cannot read that folder');
+      } finally {
+        listEl.classList.remove('dp-loading');
+      }
+    }
+
+    function renderList(dirs) {
+      listEl.innerHTML = '';
+      if (!dirs.length) {
+        const empty = document.createElement('div');
+        empty.className = 'dp-empty';
+        empty.textContent = 'No sub-folders here — “Use this folder” to pick it.';
+        listEl.appendChild(empty);
+        return;
+      }
+      for (const name of dirs) {
+        const row = document.createElement('div');
+        row.className = 'dp-row';
+        const icon = document.createElement('span'); icon.className = 'dp-icon'; icon.textContent = '📁';
+        const nm = document.createElement('span'); nm.className = 'dp-name'; nm.textContent = name;
+        const caret = document.createElement('span'); caret.className = 'dp-caret'; caret.textContent = '›';
+        row.append(icon, nm, caret);
+        row.addEventListener('click', () => navigate(joinDirPath(current, name)));
+        listEl.appendChild(row);
+      }
+    }
+
+    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); done(null); } }
+    function onOverlayClick(e) { if (e.target === overlay) done(null); }
+    function onPathKey(e) { if (e.key === 'Enter') { e.preventDefault(); navigate(pathInput.value.trim()); } }
+    const onUp = () => { if (parent) navigate(parent); };
+    const onHome = () => navigate('');
+    const onUse = () => done(current);
+    const onCancel = () => done(null);
+
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', onOverlayClick);
+    pathInput.addEventListener('keydown', onPathKey);
+    upBtn.addEventListener('click', onUp);
+    homeBtn.addEventListener('click', onHome);
+    useBtn.addEventListener('click', onUse);
+    cancelBtn.addEventListener('click', onCancel);
+    closeBtn.addEventListener('click', onCancel);
+
+    overlay.classList.remove('hidden');
+    navigate(startPath || '');
+  });
 }
 
 $('#btn-tab-add').addEventListener('click', (e) => {

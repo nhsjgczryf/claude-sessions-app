@@ -8,7 +8,7 @@
 // handler deletes any cache whose key != CACHE, so bumping forces every
 // returning visitor to re-fetch the shell (scripts are cache-first and
 // would otherwise serve stale JS forever).
-const CACHE = 'claude-sessions-shell-v4';
+const CACHE = 'claude-sessions-shell-v5';
 const SHELL = [
   '/',
   '/style.css',
