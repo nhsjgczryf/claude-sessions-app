@@ -20,4 +20,5 @@ contextBridge.exposeInMainWorld('api', {
   readFile: (filePath, maxBytes, sshHost) =>
     ipcRenderer.invoke('read-file', filePath, maxBytes, sshHost),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),
+  pickDirectory: (defaultPath) => ipcRenderer.invoke('pick-directory', defaultPath),
 });

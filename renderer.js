@@ -972,15 +972,25 @@ function openNewTabMenu(anchor) {
   menu.style.top = top + 'px';
 }
 
-function promptCustomDirAndLaunch(sessionId) {
+async function promptCustomDirAndLaunch(sessionId) {
   const base = sessions.find((s) => s.id === sessionId);
   if (!base) return;
-  const dir = window.prompt(
-    `Working directory for new "${base.name}" tab:`,
-    base.working_dir || ''
-  );
-  if (dir == null) return;
-  launchSession(sessionId, { workingDirOverride: dir.trim() || undefined });
+  // window.prompt() is disabled in Electron — go through a native dialog
+  // via IPC instead. SSH sessions still get a typed-path prompt fallback
+  // because the picker only browses the local fs, not the remote host.
+  let dir;
+  if (base.type === 'local' && window.api && window.api.pickDirectory) {
+    dir = await window.api.pickDirectory(base.working_dir || '');
+    if (dir == null) return;
+  } else {
+    dir = window.prompt(
+      `Working directory for new "${base.name}" tab:`,
+      base.working_dir || ''
+    );
+    if (dir == null) return;
+    dir = dir.trim();
+  }
+  launchSession(sessionId, { workingDirOverride: dir || undefined });
 }
 
 $('#btn-tab-add').addEventListener('click', (e) => {

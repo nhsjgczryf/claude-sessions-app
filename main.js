@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -529,6 +529,20 @@ ipcMain.handle('paste-clipboard-image', () => {
 });
 
 ipcMain.handle('scp-upload', (_evt, sshHost, localPath) => scpUpload(sshHost, localPath));
+
+// Native folder picker for the "open in custom dir" new-tab flow.
+// window.prompt() is disabled in Electron, so the web fallback never
+// shows. Returns the absolute path, or null if the user canceled.
+ipcMain.handle('pick-directory', async (_evt, defaultPath) => {
+  const opts = { properties: ['openDirectory'] };
+  if (defaultPath && typeof defaultPath === 'string') opts.defaultPath = defaultPath;
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const res = win
+    ? await dialog.showOpenDialog(win, opts)
+    : await dialog.showOpenDialog(opts);
+  if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
+  return res.filePaths[0];
+});
 
 // Read a file for the read-only preview. Local sessions read straight
 // off this machine's fs; SSH sessions run `wc -c` + `head -c | base64`
