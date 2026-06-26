@@ -598,6 +598,56 @@ ipcMain.handle('read-file', async (_evt, filePath, maxBytes, sshHost) => {
   }
 });
 
+// Directory browser for the new-tab "custom dir" picker. Local sessions
+// list this machine's fs; SSH sessions list the remote host over `ssh`
+// (the native folder dialog can only browse the local fs, so SSH used to
+// be a typed-path-only flow). Returns { path, parent, dirs } — parent is
+// null at the fs root — or { error }. Hidden dotdirs are omitted.
+ipcMain.handle('list-dir', async (_evt, dirPath, sshHost) => {
+  if (sshHost) {
+    const { execFile } = require('child_process');
+    const q = "'" + String(dirPath || '').replace(/'/g, "'\\''") + "'";
+    // cd into the target (or $HOME when blank), print the resolved abs
+    // path, a sentinel, then trailing-slash dir names (ls -p) minus dotdirs.
+    const remote =
+      `d=${q}; cd "\${d:-\$HOME}" 2>/dev/null || { printf '__ERR__\\n'; exit 0; }; ` +
+      `pwd; printf '__DIRS__\\n'; LC_ALL=C ls -1ap 2>/dev/null | grep '/\$' | grep -v '^[.]'`;
+    return new Promise((resolve) => {
+      execFile('ssh', [sshHost, remote], { timeout: 20000, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err) return resolve({ error: `ssh list failed: ${err.message}`, path: dirPath });
+          if (stdout.startsWith('__ERR__')) return resolve({ error: 'cannot open that folder', path: dirPath });
+          const sep = stdout.indexOf('__DIRS__\n');
+          if (sep < 0) return resolve({ error: 'unexpected remote output', path: dirPath });
+          const resolved = stdout.slice(0, sep).trim();
+          const dirs = stdout.slice(sep + '__DIRS__\n'.length)
+            .split('\n').map((s) => s.replace(/\/$/, '').trim()).filter(Boolean)
+            .sort((a, b) => a.localeCompare(b));
+          const parent = path.posix.dirname(resolved);
+          resolve({ path: resolved, parent: parent === resolved ? null : parent, dirs });
+        });
+    });
+  }
+
+  try {
+    const target = path.resolve(dirPath && String(dirPath).trim() ? dirPath : os.homedir());
+    const entries = fs.readdirSync(target, { withFileTypes: true });
+    const dirs = entries
+      .filter((e) => {
+        if (e.name.startsWith('.')) return false;
+        try {
+          return e.isDirectory() ||
+            (e.isSymbolicLink() && fs.statSync(path.join(target, e.name)).isDirectory());
+        } catch (_) { return false; }
+      })
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+    return { path: target, parent: path.dirname(target) === target ? null : path.dirname(target), dirs };
+  } catch (err) {
+    return { error: String(err && err.message || err), path: dirPath };
+  }
+});
+
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {

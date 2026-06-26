@@ -65,6 +65,55 @@ function notify(message, type = 'info') {
   setTimeout(() => el.remove(), 3000);
 }
 
+// window.prompt() is disabled in Electron (returns null synchronously), so
+// anywhere we need a one-line text answer we use this in-app modal instead.
+// Resolves to the entered string, or null if the user cancels.
+function inAppPrompt(title, defaultValue = '', { placeholder = '', okLabel = 'OK' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.id = 'prompt-overlay';
+    overlay.innerHTML = `
+      <div id="prompt-box">
+        <div class="editor-header">
+          <span>${escapeHtml(title)}</span>
+          <button type="button" class="prompt-x" title="Cancel (Esc)">&times;</button>
+        </div>
+        <div class="field" style="padding:14px;">
+          <input type="text" class="prompt-input" />
+        </div>
+        <div class="editor-actions" style="padding:0 14px 14px;">
+          <button type="button" class="prompt-cancel">Cancel</button>
+          <button type="button" class="prompt-ok">${escapeHtml(okLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('.prompt-input');
+    input.value = defaultValue || '';
+    if (placeholder) input.placeholder = placeholder;
+    overlay.querySelector('.prompt-ok').classList.add('primary-btn');
+
+    let done = false;
+    const close = (val) => {
+      if (done) return;
+      done = true;
+      overlay.remove();
+      resolve(val);
+    };
+    overlay.querySelector('.prompt-ok').addEventListener('click', () => close(input.value));
+    overlay.querySelector('.prompt-cancel').addEventListener('click', () => close(null));
+    overlay.querySelector('.prompt-x').addEventListener('click', () => close(null));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(null); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); close(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(null); }
+    });
+
+    input.focus();
+    input.select();
+  });
+}
+
 function bracketedPaste(tabId, text) {
   if (!text) return;
   const wrapped = `\x1b[200~${text}\x1b[201~`;
@@ -975,32 +1024,181 @@ function openNewTabMenu(anchor) {
 async function promptCustomDirAndLaunch(sessionId) {
   const base = sessions.find((s) => s.id === sessionId);
   if (!base) return;
-  // SSH: typed path (the native picker only browses the LOCAL fs, no
-  // remote-fs traversal yet). Local: native dialog via IPC. window.prompt()
-  // is disabled in Electron, so missing pickDirectory must surface as a
-  // notification instead of silently no-op-ing.
+  const sshHost = base.type === 'ssh' ? base.ssh_host : null;
   let dir;
-  if (base.type === 'ssh') {
-    dir = window.prompt(
-      `Working directory for new "${base.name}" tab (remote path):`,
-      base.working_dir || ''
+  try {
+    // Browsable tree for both local and SSH (lists the remote fs over ssh).
+    dir = await browseDirectory(base.working_dir || '', base.name, sshHost);
+  } catch (_) {
+    // Main process predates the list-dir handler (app not relaunched yet):
+    // fall back to a typed-path box so the flow still works.
+    dir = await inAppPrompt(
+      `Working dir for new "${base.name}" tab${sshHost ? ' (remote path)' : ''}`,
+      base.working_dir || '',
+      { placeholder: sshHost ? '/home/user/project' : 'D:/path', okLabel: 'Open tab' }
     );
-    if (dir == null) return;
-    dir = dir.trim();
-  } else {
-    if (!window.api || !window.api.pickDirectory) {
-      notify('Folder picker not available — quit and relaunch the app to load the update.', 'error');
-      return;
-    }
-    try {
-      dir = await window.api.pickDirectory(base.working_dir || '');
-    } catch (err) {
-      notify(`Folder picker failed: ${err && err.message}`, 'error');
-      return;
-    }
-    if (dir == null) return;
   }
-  launchSession(sessionId, { workingDirOverride: dir || undefined });
+  if (dir == null) return;
+  launchSession(sessionId, { workingDirOverride: String(dir).trim() || undefined });
+}
+
+// Browsable folder chooser backed by the list-dir IPC. Tap a folder to
+// descend, ⬆ for parent, ⌂ for home, or type a path. "Use this folder"
+// picks the open directory. Resolves to the chosen abs path, or null on
+// cancel. Rejects (so the caller can fall back) if the IPC handler is
+// missing — i.e. the main process hasn't been relaunched with this build.
+let dirPickerEl = null;
+
+function buildDirPicker() {
+  const overlay = document.createElement('div');
+  overlay.id = 'dir-picker-overlay';
+  overlay.className = 'hidden';
+  overlay.innerHTML =
+    '<div class="dir-picker">' +
+      '<div class="editor-header">' +
+        '<span class="dp-title">Choose folder</span>' +
+        '<button type="button" class="dp-close" title="Close (Esc)">&times;</button>' +
+      '</div>' +
+      '<div class="dp-pathrow">' +
+        '<button type="button" class="dp-up" title="Parent folder">&#x2B06;</button>' +
+        '<input type="text" class="dp-path" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Folder path" />' +
+        '<button type="button" class="dp-home" title="Home folder">&#x2302;</button>' +
+      '</div>' +
+      '<div class="dp-banner hidden"></div>' +
+      '<div class="dp-list"></div>' +
+      '<div class="editor-actions">' +
+        '<button type="button" class="dp-cancel">Cancel</button>' +
+        '<button type="button" class="dp-use">Use this folder</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+// Remote fs is POSIX; local Windows tolerates forward-slash joins too.
+function joinDirPath(base, name) {
+  if (!base) return name;
+  return base.endsWith('/') || base.endsWith('\\') ? base + name : base + '/' + name;
+}
+
+function browseDirectory(startPath, label, sshHost) {
+  const overlay = dirPickerEl || (dirPickerEl = buildDirPicker());
+  const titleEl = overlay.querySelector('.dp-title');
+  const pathInput = overlay.querySelector('.dp-path');
+  const listEl = overlay.querySelector('.dp-list');
+  const bannerEl = overlay.querySelector('.dp-banner');
+  const upBtn = overlay.querySelector('.dp-up');
+  const homeBtn = overlay.querySelector('.dp-home');
+  const useBtn = overlay.querySelector('.dp-use');
+  const cancelBtn = overlay.querySelector('.dp-cancel');
+  const closeBtn = overlay.querySelector('.dp-close');
+
+  titleEl.textContent = label ? `Choose folder — ${label}` : 'Choose folder';
+
+  let current = null;   // resolved abs path currently shown
+  let parent = null;    // parent of `current`, or null at the fs root
+  let firstNav = true;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    function teardown() {
+      document.removeEventListener('keydown', onKey);
+      overlay.removeEventListener('mousedown', onOverlayClick);
+      pathInput.removeEventListener('keydown', onPathKey);
+      upBtn.removeEventListener('click', onUp);
+      homeBtn.removeEventListener('click', onHome);
+      useBtn.removeEventListener('click', onUse);
+      cancelBtn.removeEventListener('click', onCancel);
+      closeBtn.removeEventListener('click', onCancel);
+      overlay.classList.add('hidden');
+    }
+    function done(value) {
+      if (settled) return;
+      settled = true;
+      teardown();
+      resolve(value);
+    }
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      teardown();
+      reject(err);
+    }
+
+    function showBanner(text) {
+      bannerEl.textContent = text || '';
+      bannerEl.classList.toggle('hidden', !text);
+    }
+
+    async function navigate(p) {
+      showBanner('');
+      listEl.classList.add('dp-loading');
+      let data;
+      try {
+        data = await ipcRenderer.invoke('list-dir', p == null ? '' : p, sshHost);
+      } catch (err) {
+        // No handler registered → old main process. Bail so the caller
+        // can fall back to a typed-path prompt.
+        if (firstNav) return fail(err);
+        showBanner(err && err.message ? err.message : 'Cannot read that folder');
+        listEl.classList.remove('dp-loading');
+        return;
+      }
+      firstNav = false;
+      listEl.classList.remove('dp-loading');
+      if (data && data.error) {
+        showBanner(data.error);
+        if (data.path != null) pathInput.value = data.path;
+        return;
+      }
+      current = data.path;
+      parent = data.parent;
+      pathInput.value = current;
+      upBtn.disabled = !parent;
+      renderList(data.dirs || []);
+    }
+
+    function renderList(dirs) {
+      listEl.innerHTML = '';
+      if (!dirs.length) {
+        const empty = document.createElement('div');
+        empty.className = 'dp-empty';
+        empty.textContent = 'No sub-folders here — “Use this folder” to pick it.';
+        listEl.appendChild(empty);
+        return;
+      }
+      for (const name of dirs) {
+        const row = document.createElement('div');
+        row.className = 'dp-row';
+        const icon = document.createElement('span'); icon.className = 'dp-icon'; icon.textContent = '📁';
+        const nm = document.createElement('span'); nm.className = 'dp-name'; nm.textContent = name;
+        const caret = document.createElement('span'); caret.className = 'dp-caret'; caret.textContent = '›';
+        row.append(icon, nm, caret);
+        row.addEventListener('click', () => navigate(joinDirPath(current, name)));
+        listEl.appendChild(row);
+      }
+    }
+
+    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); done(null); } }
+    function onOverlayClick(e) { if (e.target === overlay) done(null); }
+    function onPathKey(e) { if (e.key === 'Enter') { e.preventDefault(); navigate(pathInput.value.trim()); } }
+    const onUp = () => { if (parent) navigate(parent); };
+    const onHome = () => navigate('');
+    const onUse = () => done(current);
+    const onCancel = () => done(null);
+
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('mousedown', onOverlayClick);
+    pathInput.addEventListener('keydown', onPathKey);
+    upBtn.addEventListener('click', onUp);
+    homeBtn.addEventListener('click', onHome);
+    useBtn.addEventListener('click', onUse);
+    cancelBtn.addEventListener('click', onCancel);
+    closeBtn.addEventListener('click', onCancel);
+
+    overlay.classList.remove('hidden');
+    navigate(startPath || '');
+  });
 }
 
 $('#btn-tab-add').addEventListener('click', (e) => {
