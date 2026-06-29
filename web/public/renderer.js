@@ -10,6 +10,7 @@ const FitAddon = window.FitAddon && window.FitAddon.FitAddon;
 const SearchAddon = window.SearchAddon && window.SearchAddon.SearchAddon;
 const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
 const Unicode11Addon = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
+const WebglAddon = window.WebglAddon && window.WebglAddon.WebglAddon;
 
 const THEME = {
   background: '#1e1e2e',
@@ -772,6 +773,20 @@ function launchSession(sessionId, opts) {
     } catch (_) { searchAddon = null; }
   }
   term.open(container);
+
+  // WebGL renderer — must be loaded AFTER term.open(). Falls back to the
+  // default DOM renderer if WebGL is unavailable (older mobile browsers,
+  // headless contexts, GPU blocked).
+  if (WebglAddon) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => { try { webgl.dispose(); } catch (_) {} });
+      term.loadAddon(webgl);
+    } catch (e) {
+      console.warn('[webgl] failed to load, using DOM renderer:', e && e.message);
+    }
+  }
+
   fitAddon.fit();
 
   const tab = {

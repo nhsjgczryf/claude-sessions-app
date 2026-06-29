@@ -8,7 +8,7 @@
 // handler deletes any cache whose key != CACHE, so bumping forces every
 // returning visitor to re-fetch the shell (scripts are cache-first and
 // would otherwise serve stale JS forever).
-const CACHE = 'claude-sessions-shell-v5';
+const CACHE = 'claude-sessions-shell-v6';
 const SHELL = [
   '/',
   '/style.css',
@@ -23,6 +23,7 @@ const SHELL = [
   '/vendor/xterm/addon-web-links/lib/addon-web-links.js',
   '/vendor/xterm/addon-unicode11/lib/addon-unicode11.js',
   '/vendor/xterm/addon-search/lib/addon-search.js',
+  '/vendor/xterm/addon-webgl/lib/addon-webgl.js',
 ];
 
 self.addEventListener('install', (event) => {

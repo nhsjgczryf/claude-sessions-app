@@ -6,6 +6,9 @@ const { Unicode11Addon } = require('@xterm/addon-unicode11');
 let SearchAddon = null;
 try { SearchAddon = require('@xterm/addon-search').SearchAddon; }
 catch (e) { console.warn('[search] @xterm/addon-search not installed:', e && e.message); }
+let WebglAddon = null;
+try { WebglAddon = require('@xterm/addon-webgl').WebglAddon; }
+catch (e) { console.warn('[webgl] @xterm/addon-webgl not installed:', e && e.message); }
 
 // Populate the globals the shared file-preview.js module reads. Under
 // Electron's nodeIntegration a UMD <script> would attach to
@@ -518,6 +521,20 @@ function launchSession(sessionId, opts) {
   }
 
   term.open(container);
+
+  // WebGL renderer — must be loaded AFTER term.open() so the canvas
+  // context is available. Falls back silently to the default DOM
+  // renderer if WebGL is unavailable (rare; e.g. headless / sw rendering).
+  if (WebglAddon) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => { try { webgl.dispose(); } catch (_) {} });
+      term.loadAddon(webgl);
+    } catch (e) {
+      console.warn('[webgl] failed to load, using DOM renderer:', e && e.message);
+    }
+  }
+
   fitAddon.fit();
 
   const tab = {
