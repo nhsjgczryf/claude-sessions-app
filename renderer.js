@@ -146,6 +146,29 @@ function sessionInstanceCount(sessionId) {
 
 const LS_LAST_LAUNCHED = 'claude-sessions.lastLaunchedId';
 const LS_SESSION_SCOPE = 'claude-sessions.sessionScope';
+const LS_COLLAPSED_GROUPS = 'claude-sessions.collapsedGroups';
+
+// Set of sessionIds whose tab-group is currently collapsed in the tab bar.
+// Same session across workspaces shares the collapse state (only one workspace
+// is visible at a time anyway, so this is fine).
+const collapsedGroups = new Set(loadCollapsedGroups());
+// Per-group, the last tab within the group that the user focused. When the
+// group is collapsed and the user clicks the header, we activate this one.
+const lastActiveInGroup = new Map();
+
+function loadCollapsedGroups() {
+  try {
+    const raw = localStorage.getItem(LS_COLLAPSED_GROUPS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+function saveCollapsedGroups() {
+  try {
+    localStorage.setItem(LS_COLLAPSED_GROUPS, JSON.stringify([...collapsedGroups]));
+  } catch (_) {}
+}
 
 function shortDir(dir) {
   if (!dir) return '';
@@ -740,6 +763,7 @@ function switchToTab(tabId) {
   }
   const tab = tabs.find((t) => t.id === tabId);
   if (tab) {
+    lastActiveInGroup.set(tab.sessionId, tabId);
     try {
       tab.fitAddon.fit();
       const { cols, rows } = tab.term;
@@ -782,32 +806,157 @@ function tabsInActiveWorkspace() {
 function renderTabs() {
   const el = $('#tabs');
   el.innerHTML = '';
-  // Only render tabs belonging to the active workspace; the others still
-  // exist (their PTY is running) but are hidden.
+
+  // Group active-workspace tabs by sessionId. Group order = order of the
+  // first tab of that session in the `tabs` array, so drag-reorders still
+  // control how groups line up.
+  const groupsBySession = new Map();
   for (const t of tabs) {
     if (t.workspaceId !== activeWorkspaceId) continue;
-    const div = document.createElement('div');
-    div.className = 'tab' + (t.id === activeTabId ? ' active' : '') + (t.alive ? '' : ' dead');
-    div.draggable = true;
-    div.dataset.tabId = t.id;
-    div.innerHTML = `
-      <span class="tab-status"></span>
-      <span class="tab-name">${escapeHtml(t.sessionName)}</span>
-      <span class="tab-close" title="Close (Ctrl+W)">&times;</span>
-    `;
-    div.addEventListener('click', (e) => {
-      if (e.target.classList.contains('tab-close')) {
-        closeTab(t.id);
-      } else {
-        switchToTab(t.id);
-      }
-    });
-    div.addEventListener('auxclick', (e) => {
-      if (e.button === 1) closeTab(t.id);
-    });
-    attachTabDragHandlers(div, t.id);
-    el.appendChild(div);
+    if (!groupsBySession.has(t.sessionId)) groupsBySession.set(t.sessionId, []);
+    groupsBySession.get(t.sessionId).push(t);
   }
+
+  for (const [sessionId, groupTabs] of groupsBySession) {
+    const session = sessions.find((s) => s.id === sessionId);
+    const groupName = session ? session.name : (groupTabs[0].sessionName || 'session');
+    const isSingle = groupTabs.length === 1;
+    const collapsed = !isSingle && collapsedGroups.has(sessionId);
+    const hasActive = groupTabs.some((t) => t.id === activeTabId);
+
+    const groupEl = document.createElement('div');
+    groupEl.className = 'tab-group'
+      + (collapsed ? ' collapsed' : '')
+      + (hasActive ? ' has-active' : '');
+    groupEl.dataset.sessionId = sessionId;
+
+    // Header only shown for real clusters (>= 2 tabs).
+    if (!isSingle) {
+      const header = document.createElement('div');
+      header.className = 'tab-group-header';
+      header.title = collapsed
+        ? `${groupName} — 点击展开 · 组内 ${groupTabs.length} 个标签`
+        : `${groupName} — 点击折叠`;
+      header.innerHTML = `
+        <span class="tg-caret">${collapsed ? '&#x25B8;' : '&#x25BE;'}</span>
+        <span class="tg-name">${escapeHtml(groupName)}</span>
+        <span class="tg-count">(${groupTabs.length})</span>
+      `;
+      header.addEventListener('click', () => {
+        if (collapsedGroups.has(sessionId)) {
+          collapsedGroups.delete(sessionId);
+        } else {
+          collapsedGroups.add(sessionId);
+          // On collapse, keep this group's "spotlight" tab active so the
+          // header stays highlighted. Prefer the last-focused tab in the
+          // group; else the currently-active one if it belongs; else the
+          // first alive one.
+          const preferId = lastActiveInGroup.get(sessionId);
+          const preferred = groupTabs.find((t) => t.id === preferId)
+            || groupTabs.find((t) => t.id === activeTabId)
+            || groupTabs.find((t) => t.alive)
+            || groupTabs[0];
+          if (preferred) switchToTab(preferred.id);
+        }
+        saveCollapsedGroups();
+        renderTabs();
+      });
+      header.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showGroupContextMenu(e.clientX, e.clientY, sessionId, groupTabs);
+      });
+      groupEl.appendChild(header);
+    }
+
+    for (const t of groupTabs) {
+      const div = document.createElement('div');
+      div.className = 'tab' + (t.id === activeTabId ? ' active' : '') + (t.alive ? '' : ' dead');
+      div.draggable = true;
+      div.dataset.tabId = t.id;
+      // Inside a group we drop the redundant session-name prefix; #2 / #3
+      // (etc.) makes the individual tab meaningful when the group header
+      // already carries the session name.
+      const label = (isSingle || !session)
+        ? t.sessionName
+        : deriveTabShortLabel(t, session.name);
+      div.innerHTML = `
+        <span class="tab-status"></span>
+        <span class="tab-name">${escapeHtml(label)}</span>
+        <span class="tab-close" title="Close (Ctrl+W)">&times;</span>
+      `;
+      div.addEventListener('click', (e) => {
+        if (e.target.classList.contains('tab-close')) {
+          closeTab(t.id);
+        } else {
+          switchToTab(t.id);
+        }
+      });
+      div.addEventListener('auxclick', (e) => {
+        if (e.button === 1) closeTab(t.id);
+      });
+      attachTabDragHandlers(div, t.id);
+      groupEl.appendChild(div);
+    }
+
+    el.appendChild(groupEl);
+  }
+}
+
+// Strip the "SessionName" prefix from a tab's display name inside a group,
+// leaving just the "#2" suffix or "· workingDir" hint. Falls back to the
+// full name if no prefix is found.
+function deriveTabShortLabel(tab, sessionName) {
+  const full = tab.sessionName || sessionName;
+  if (full.startsWith(sessionName)) {
+    const rest = full.slice(sessionName.length).replace(/^\s+/, '');
+    return rest || '#1';
+  }
+  return full;
+}
+
+function showGroupContextMenu(x, y, sessionId, groupTabs) {
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const isCollapsed = collapsedGroups.has(sessionId);
+  const items = [
+    {
+      label: isCollapsed ? '展开这一组' : '折叠这一组',
+      action: () => {
+        if (isCollapsed) collapsedGroups.delete(sessionId);
+        else collapsedGroups.add(sessionId);
+        saveCollapsedGroups();
+        renderTabs();
+      },
+    },
+    {
+      label: `+ 新建同类标签 (${groupTabs.length + 1})`,
+      action: () => launchSession(sessionId),
+    },
+    { sep: true },
+    {
+      label: `关闭这一组的全部 ${groupTabs.length} 个标签`,
+      danger: true,
+      action: () => {
+        if (!confirm(`关闭这一组下的 ${groupTabs.length} 个标签?`)) return;
+        for (const t of [...groupTabs]) closeTab(t.id);
+      },
+    },
+  ];
+  for (const item of items) {
+    if (item.sep) {
+      const s = document.createElement('div'); s.className = 'menu-sep';
+      menu.appendChild(s); continue;
+    }
+    const mi = document.createElement('div');
+    mi.className = 'menu-item' + (item.danger ? ' danger' : '');
+    mi.textContent = item.label;
+    mi.addEventListener('click', () => { menu.classList.add('hidden'); item.action(); });
+    menu.appendChild(mi);
+  }
+  menu.classList.remove('hidden');
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.left = Math.min(x, vw - 200) + 'px';
+  menu.style.top = Math.min(y, vh - 180) + 'px';
 }
 
 // ============================================================================
