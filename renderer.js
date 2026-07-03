@@ -804,6 +804,11 @@ function tabsInActiveWorkspace() {
 }
 
 function renderTabs() {
+  updateRunningCount();
+  // Keep the panel fresh if it's currently open.
+  const panel = document.getElementById('running-panel');
+  if (panel && !panel.classList.contains('hidden')) renderRunningPanel();
+
   const el = $('#tabs');
   el.innerHTML = '';
 
@@ -1923,6 +1928,137 @@ if (scopeCur) scopeCur.addEventListener('click', () => setSessionScope('current'
 if (scopeAll) scopeAll.addEventListener('click', () => setSessionScope('all'));
 
 // ============================================================================
+// Running-tabs global panel (across workspaces + collapsed groups)
+// ============================================================================
+//
+// Because both workspace filtering and group collapsing can hide alive PTYs
+// from the tab bar, users need a single "what's actually running right now?"
+// view. The panel lists every alive tab across every workspace, grouped by
+// workspace, with click → switch workspace + activate tab.
+
+function updateRunningCount() {
+  const btn = $('#btn-running');
+  const countEl = $('#running-count');
+  if (!btn || !countEl) return;
+  const aliveCount = tabs.filter((t) => t.alive).length;
+  countEl.textContent = String(aliveCount);
+  btn.classList.toggle('zero', aliveCount === 0);
+  btn.title = aliveCount === 0
+    ? '没有运行中的标签'
+    : `${aliveCount} 个运行中的标签 · 点击查看跨工作区列表`;
+}
+
+let runningPanelEl = null;
+function ensureRunningPanel() {
+  if (runningPanelEl) return runningPanelEl;
+  runningPanelEl = document.createElement('div');
+  runningPanelEl.id = 'running-panel';
+  runningPanelEl.className = 'hidden';
+  document.body.appendChild(runningPanelEl);
+  // Click outside closes it.
+  document.addEventListener('mousedown', (e) => {
+    if (!runningPanelEl || runningPanelEl.classList.contains('hidden')) return;
+    if (runningPanelEl.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('#btn-running')) return;
+    runningPanelEl.classList.add('hidden');
+  });
+  return runningPanelEl;
+}
+
+function toggleRunningPanel(anchor) {
+  const panel = ensureRunningPanel();
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  renderRunningPanel();
+  panel.classList.remove('hidden');
+  const rect = anchor.getBoundingClientRect();
+  const pw = panel.offsetWidth;
+  let left = rect.right - pw;
+  if (left < 8) left = 8;
+  panel.style.left = left + 'px';
+  panel.style.top = (rect.bottom + 4) + 'px';
+}
+
+function renderRunningPanel() {
+  const panel = ensureRunningPanel();
+  panel.innerHTML = '';
+
+  // Group by workspace: any workspace that owns at least one tab shows up.
+  // Foreign / unknown workspaceIds (e.g. session imported from an older
+  // build) get lumped into a "其他" section so nothing gets orphaned.
+  const byWs = new Map();
+  for (const t of tabs) {
+    const key = t.workspaceId || '__none__';
+    if (!byWs.has(key)) byWs.set(key, []);
+    byWs.get(key).push(t);
+  }
+
+  if (byWs.size === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'rp-empty';
+    empty.textContent = '没有运行中的标签';
+    panel.appendChild(empty);
+    return;
+  }
+
+  // Active workspace first, then the rest in workspace-list order.
+  const orderedKeys = [
+    activeWorkspaceId,
+    ...workspaces.map((w) => w.id).filter((id) => id !== activeWorkspaceId),
+    '__none__',
+  ].filter((k, i, arr) => byWs.has(k) && arr.indexOf(k) === i);
+
+  for (const wsId of orderedKeys) {
+    const ws = workspaces.find((w) => w.id === wsId);
+    const wsName = ws ? ws.name : '其他';
+    const groupTabs = byWs.get(wsId) || [];
+    const aliveCount = groupTabs.filter((t) => t.alive).length;
+
+    const head = document.createElement('div');
+    head.className = 'rp-group';
+    head.innerHTML = `${escapeHtml(wsName)}<span class="rp-badge">${aliveCount}/${groupTabs.length}</span>`;
+    panel.appendChild(head);
+
+    for (const t of groupTabs) {
+      const row = document.createElement('div');
+      row.className = 'rp-row'
+        + (t.id === activeTabId ? ' active' : '')
+        + (t.alive ? '' : ' dead');
+      row.innerHTML = `
+        <span class="rp-status"></span>
+        <span class="rp-name">${escapeHtml(t.sessionName)}</span>
+        <span class="rp-close" title="关闭">&times;</span>
+      `;
+      row.addEventListener('click', (e) => {
+        if (e.target.classList.contains('rp-close')) {
+          closeTab(t.id);
+          renderRunningPanel();
+          return;
+        }
+        // Jump to this tab's workspace if needed, then activate the tab.
+        if (t.workspaceId && t.workspaceId !== activeWorkspaceId) {
+          switchWorkspace(t.workspaceId).then(() => switchToTab(t.id));
+        } else {
+          switchToTab(t.id);
+        }
+        ensureRunningPanel().classList.add('hidden');
+      });
+      panel.appendChild(row);
+    }
+  }
+}
+
+const btnRunning = $('#btn-running');
+if (btnRunning) {
+  btnRunning.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleRunningPanel(btnRunning);
+  });
+}
+
+// ============================================================================
 // Initial load
 // ============================================================================
 
@@ -1935,6 +2071,7 @@ if (scopeAll) scopeAll.addEventListener('click', () => setSessionScope('all'));
   await loadWorkspacesFromDisk();
   updateWorkspaceButton();
   setSessionScope(sessionScope);
+  updateRunningCount();
   // Restore tabs remembered for the active workspace from last session.
   restoreRememberedTabs(activeWorkspaceId);
 })();

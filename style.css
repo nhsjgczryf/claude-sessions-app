@@ -386,6 +386,97 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 .tab-add-btn:hover { background: var(--bg-hover); color: var(--fg); }
 .tab-add-caret { font-size: 11px; padding: 4px 4px; }
 
+.running-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 3px 8px;
+  color: var(--fg-dim);
+}
+.running-btn:hover { color: var(--fg); }
+.running-btn .running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(166, 227, 161, 0.6);
+}
+.running-btn.zero { opacity: 0.5; }
+.running-btn.zero .running-dot {
+  background: var(--fg-dim);
+  box-shadow: none;
+}
+
+#running-panel {
+  position: fixed;
+  z-index: 200;
+  min-width: 280px;
+  max-width: 380px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-elev, var(--bg-hover));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px 0;
+  font-size: 12px;
+}
+#running-panel.hidden { display: none; }
+.rp-group {
+  padding: 6px 10px 4px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-top: 1px solid var(--border);
+}
+.rp-group:first-child { border-top: 0; }
+.rp-group .rp-badge {
+  margin-left: 6px;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.rp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.rp-row:hover { background: var(--bg-selected); }
+.rp-row.active { background: var(--bg-selected); }
+.rp-row .rp-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+.rp-row.dead .rp-status { background: var(--red); }
+.rp-row .rp-name {
+  flex: 1;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-row .rp-close {
+  color: var(--fg-dim);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+}
+.rp-row .rp-close:hover { background: var(--red); color: white; }
+.rp-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+
 .tab {
   display: flex;
   align-items: center;
