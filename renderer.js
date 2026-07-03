@@ -51,6 +51,9 @@ let tabCounter = 0;
 // ids + a remembered tab layout). See docs at the top of loadWorkspacesFromDisk.
 let workspaces = [];
 let activeWorkspaceId = null;
+// Sidebar scope: 'current' shows only sessions in the active workspace,
+// 'all' shows everything with foreign cards dimmed + an inline "+加入" button.
+let sessionScope = 'current';
 // While loading remembered tabs on startup / workspace switch, suppress the
 // per-launch snapshot save (we'd be overwriting the snapshot with itself).
 let suspendSnapshot = false;
@@ -142,6 +145,7 @@ function sessionInstanceCount(sessionId) {
 }
 
 const LS_LAST_LAUNCHED = 'claude-sessions.lastLaunchedId';
+const LS_SESSION_SCOPE = 'claude-sessions.sessionScope';
 
 function shortDir(dir) {
   if (!dir) return '';
@@ -291,26 +295,38 @@ function renderSessionList() {
   }
 
   const ws = getActiveWorkspace();
-  const visible = ws
-    ? sessions.filter((s) => (ws.session_ids || []).includes(s.id))
-    : sessions;
+  const memberIds = new Set((ws && ws.session_ids) || []);
+  const visible = sessionScope === 'all'
+    ? sessions
+    : sessions.filter((s) => memberIds.has(s.id));
 
   if (visible.length === 0) {
     const empty = document.createElement('div');
     empty.style.cssText = 'padding: 16px; text-align: center; color: var(--fg-dim); font-size: 12px; line-height:1.6;';
-    empty.innerHTML = '本工作区还没有会话。<br/>点击上方的“工作区”菜单里的<br/>“添加会话到工作区…”';
+    empty.innerHTML = '本工作区还没有会话。<br/>点上方"全部"看所有会话,<br/>或"工作区"菜单里勾选加入。';
     list.appendChild(empty);
     return;
   }
 
   for (const s of visible) {
+    const inWs = memberIds.has(s.id);
+    const foreign = sessionScope === 'all' && !inWs;
+
     const card = document.createElement('div');
-    card.className = 'session-card';
+    card.className = 'session-card' + (foreign ? ' foreign' : '');
     if (s.id === selectedSessionId) card.classList.add('selected');
     card.dataset.id = s.id;
     card.draggable = true;
 
     const count = sessionInstanceCount(s.id);
+    // Which other workspaces this session lives in — shown as small footer
+    // text only in "all" scope, so users can see cross-workspace membership.
+    const memberOf = workspaces
+      .filter((w) => (w.session_ids || []).includes(s.id))
+      .map((w) => w.name);
+    const badgesHtml = (sessionScope === 'all' && memberOf.length)
+      ? `<span class="ws-badges" title="属于工作区: ${escapeHtml(memberOf.join(', '))}">📁 ${escapeHtml(memberOf.join(' · '))}</span>`
+      : '';
 
     card.innerHTML = `
       <div class="session-card-top">
@@ -318,8 +334,10 @@ function renderSessionList() {
         <span class="session-name">${escapeHtml(s.name)}</span>
         <span class="badge ${s.type === 'ssh' ? 'ssh' : 'local'}">${s.type === 'ssh' ? 'SSH' : 'WIN'}</span>
         ${count > 0 ? `<span class="badge count">${count}</span>` : ''}
+        ${foreign ? `<button class="ws-add-btn" data-action="add-to-ws" title="加入当前工作区">+ 加入</button>` : ''}
       </div>
       ${s.description ? `<div class="session-desc">${escapeHtml(s.description)}</div>` : ''}
+      ${badgesHtml ? `<div class="session-desc" style="padding-top:2px;">${badgesHtml}</div>` : ''}
       <div class="session-actions">
         <button data-action="launch">Launch</button>
         <button data-action="edit">Edit</button>
@@ -352,6 +370,7 @@ function renderSessionList() {
         if (action === 'launch') launchSession(s.id);
         else if (action === 'edit') openEditor(s.id);
         else if (action === 'clone') cloneSession(s.id);
+        else if (action === 'add-to-ws') addSessionToActiveWorkspace(s.id);
       });
     });
 
@@ -1588,6 +1607,27 @@ function removeSessionFromActiveWorkspace(sessionId) {
   renderSessionList();
 }
 
+function addSessionToActiveWorkspace(sessionId) {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  if ((ws.session_ids || []).includes(sessionId)) return;
+  ws.session_ids = [...(ws.session_ids || []), sessionId];
+  persistWorkspaces();
+  renderSessionList();
+  notify(`已加入工作区 "${ws.name}"`, 'success');
+}
+
+function setSessionScope(scope) {
+  if (scope !== 'current' && scope !== 'all') return;
+  sessionScope = scope;
+  try { localStorage.setItem(LS_SESSION_SCOPE, scope); } catch (_) {}
+  const cur = $('#scope-current');
+  const all = $('#scope-all');
+  if (cur) cur.classList.toggle('active', scope === 'current');
+  if (all) all.classList.toggle('active', scope === 'all');
+  renderSessionList();
+}
+
 function openWorkspaceMenu(anchor) {
   const menu = $('#context-menu');
   menu.innerHTML = '';
@@ -1728,15 +1768,24 @@ if (btnWs) {
   });
 }
 
+const scopeCur = $('#scope-current');
+const scopeAll = $('#scope-all');
+if (scopeCur) scopeCur.addEventListener('click', () => setSessionScope('current'));
+if (scopeAll) scopeAll.addEventListener('click', () => setSessionScope('all'));
+
 // ============================================================================
 // Initial load
 // ============================================================================
 
 (async function init() {
+  try {
+    const s = localStorage.getItem(LS_SESSION_SCOPE);
+    if (s === 'all' || s === 'current') sessionScope = s;
+  } catch (_) {}
   await loadSessionsFromDisk();
   await loadWorkspacesFromDisk();
   updateWorkspaceButton();
-  renderSessionList();
+  setSessionScope(sessionScope);
   // Restore tabs remembered for the active workspace from last session.
   restoreRememberedTabs(activeWorkspaceId);
 })();

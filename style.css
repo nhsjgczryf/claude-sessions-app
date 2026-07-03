@@ -180,6 +180,55 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 .workspace-btn .ws-caret { color: var(--fg-dim); font-size: 10px; }
 
+.scope-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+.scope-pill {
+  flex: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  border-radius: 3px;
+}
+.scope-pill:hover { background: var(--bg-hover); color: var(--fg); }
+.scope-pill.active {
+  background: var(--bg-selected);
+  color: var(--fg);
+}
+
+.session-card.foreign {
+  opacity: 0.55;
+}
+.session-card.foreign:hover { opacity: 1; }
+.session-card .ws-add-btn {
+  border: 1px solid var(--border);
+  color: var(--accent);
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  line-height: 1.2;
+}
+.session-card .ws-add-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+.session-card .ws-badges {
+  font-size: 10px;
+  color: var(--fg-dim);
+  margin-left: 4px;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .menu-item.checked::before {
   content: '✓ ';
   color: var(--accent);
