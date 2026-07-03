@@ -1708,7 +1708,7 @@ async function restoreRememberedTabs(wsId) {
 }
 
 async function newWorkspace() {
-  const name = await inAppPrompt('新工作区名称', '', { placeholder: '例如 cmb-wealth' });
+  const name = await inAppPrompt('新工作区名称', '', { placeholder: '例如: 项目 A' });
   if (name == null) return;
   const trimmed = name.trim();
   if (!trimmed) return;
@@ -1786,29 +1786,43 @@ function openWorkspaceMenu(anchor) {
   const menu = $('#context-menu');
   menu.innerHTML = '';
 
-  // Header
   const header = document.createElement('div');
   header.className = 'menu-header';
   header.textContent = '切换工作区';
   menu.appendChild(header);
 
-  for (const w of workspaces) {
-    const mi = document.createElement('div');
-    mi.className = 'menu-item checked' + (w.id === activeWorkspaceId ? '' : ' unchecked');
+  workspaces.forEach((w, idx) => {
+    const row = document.createElement('div');
+    row.className = 'menu-item ws-row checked' + (w.id === activeWorkspaceId ? '' : ' unchecked');
     const count = (w.session_ids || []).length;
-    mi.textContent = `${w.name}  (${count})`;
-    mi.addEventListener('click', () => {
+    row.innerHTML = `
+      <span class="ws-row-label">${escapeHtml(w.name)}  <span style="color:var(--fg-dim)">(${count})</span></span>
+      <span class="ws-row-arrows">
+        <button class="ws-arrow" data-dir="up" title="上移" ${idx === 0 ? 'disabled' : ''}>&#x25B4;</button>
+        <button class="ws-arrow" data-dir="down" title="下移" ${idx === workspaces.length - 1 ? 'disabled' : ''}>&#x25BE;</button>
+      </span>
+    `;
+    row.addEventListener('click', (e) => {
+      // Don't switch when the click was on one of the reorder arrows.
+      if (e.target.closest('.ws-arrow')) return;
       menu.classList.add('hidden');
       switchWorkspace(w.id);
     });
-    menu.appendChild(mi);
-  }
+    row.querySelectorAll('.ws-arrow').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (btn.disabled) return;
+        moveWorkspace(w.id, btn.dataset.dir === 'up' ? -1 : 1);
+        openWorkspaceMenu(anchor);   // re-render menu in place
+      });
+    });
+    menu.appendChild(row);
+  });
 
   const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep);
 
   const items = [
     { label: '+ 新建工作区…', action: newWorkspace },
-    { label: '添加会话到工作区…', action: () => openAddSessionsToWorkspaceMenu() },
     { label: '重命名当前工作区…', action: () => renameWorkspace(activeWorkspaceId) },
     { label: '删除当前工作区', danger: true, action: () => deleteWorkspace(activeWorkspaceId) },
   ];
@@ -1831,55 +1845,14 @@ function openWorkspaceMenu(anchor) {
   menu.style.top = top + 'px';
 }
 
-// Multi-select checklist: which sessions belong to the current workspace.
-function openAddSessionsToWorkspaceMenu() {
-  const ws = getActiveWorkspace();
-  if (!ws) return;
-  const menu = $('#context-menu');
-  menu.innerHTML = '';
-  const header = document.createElement('div');
-  header.className = 'menu-header';
-  header.textContent = `工作区“${ws.name}”包含的会话`;
-  menu.appendChild(header);
-
-  if (sessions.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'menu-item dim';
-    empty.textContent = '还没有任何会话,先建一个';
-    menu.appendChild(empty);
-  }
-
-  for (const s of sessions) {
-    const inWs = (ws.session_ids || []).includes(s.id);
-    const mi = document.createElement('div');
-    mi.className = 'menu-item checked' + (inWs ? '' : ' unchecked');
-    mi.textContent = s.name;
-    mi.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (inWs) {
-        ws.session_ids = (ws.session_ids || []).filter((id) => id !== s.id);
-      } else {
-        ws.session_ids = [...(ws.session_ids || []), s.id];
-      }
-      persistWorkspaces();
-      renderSessionList();
-      openAddSessionsToWorkspaceMenu();
-    });
-    menu.appendChild(mi);
-  }
-
-  const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep);
-  const done = document.createElement('div');
-  done.className = 'menu-item';
-  done.textContent = '完成';
-  done.addEventListener('click', () => menu.classList.add('hidden'));
-  menu.appendChild(done);
-
-  menu.classList.remove('hidden');
-  const anchor = $('#btn-workspace');
-  const rect = anchor.getBoundingClientRect();
-  menu.style.left = rect.left + 'px';
-  menu.style.top = (rect.bottom + 2) + 'px';
+function moveWorkspace(wsId, delta) {
+  const idx = workspaces.findIndex((w) => w.id === wsId);
+  if (idx < 0) return;
+  const target = idx + delta;
+  if (target < 0 || target >= workspaces.length) return;
+  const [moved] = workspaces.splice(idx, 1);
+  workspaces.splice(target, 0, moved);
+  persistWorkspaces();
 }
 
 function openAddToWorkspaceMenu(sessionId, x, y) {

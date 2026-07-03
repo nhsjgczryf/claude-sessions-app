@@ -229,6 +229,43 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   white-space: nowrap;
 }
 
+.menu-item.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.menu-item.ws-row .ws-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item.ws-row .ws-row-arrows {
+  display: flex;
+  gap: 2px;
+  opacity: 0.55;
+}
+.menu-item.ws-row:hover .ws-row-arrows { opacity: 1; }
+.menu-item.ws-row .ws-arrow {
+  width: 22px;
+  padding: 2px 0;
+  font-size: 11px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  border-radius: 3px;
+}
+.menu-item.ws-row .ws-arrow:not(:disabled):hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+  border-color: var(--border);
+}
+.menu-item.ws-row .ws-arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 .menu-item.checked::before {
   content: '✓ ';
   color: var(--accent);
