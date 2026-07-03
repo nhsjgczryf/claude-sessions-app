@@ -47,6 +47,14 @@ let tabs = [];
 let activeTabId = null;
 let tabCounter = 0;
 
+// Workspaces (shared session pool; each workspace is a "collection" of session
+// ids + a remembered tab layout). See docs at the top of loadWorkspacesFromDisk.
+let workspaces = [];
+let activeWorkspaceId = null;
+// While loading remembered tabs on startup / workspace switch, suppress the
+// per-launch snapshot save (we'd be overwriting the snapshot with itself).
+let suspendSnapshot = false;
+
 let editingId = null;
 
 // ============================================================================
@@ -176,6 +184,97 @@ async function persistSessions() {
 }
 
 // ============================================================================
+// Workspaces
+// ============================================================================
+//
+// Sessions are a shared pool: each workspace holds a list of session_ids it
+// "shows" in the sidebar; the same session can appear in multiple workspaces.
+// Tabs are workspace-scoped (a tab created in workspace X only shows up in
+// X's tab bar). Switching workspaces hides the other workspace's tab DOM but
+// leaves the PTY alive in the background. `remembered_tabs` is a snapshot of
+// what to relaunch when the app opens this workspace on next startup — for
+// tmux-persistent sessions the relaunch reattaches to the running claude.
+
+async function loadWorkspacesFromDisk() {
+  try {
+    const data = await ipcRenderer.invoke('load-workspaces');
+    workspaces = (data && Array.isArray(data.workspaces)) ? data.workspaces : [];
+    activeWorkspaceId = (data && data.active_workspace_id) || null;
+  } catch (err) {
+    console.error('[workspaces] load failed:', err);
+    workspaces = [];
+    activeWorkspaceId = null;
+  }
+  ensureDefaultWorkspace();
+}
+
+// If there are no workspaces yet (fresh install / migrating from pre-workspace
+// build), create one that shows every existing session, so the sidebar isn't
+// empty on first launch after the upgrade.
+function ensureDefaultWorkspace() {
+  if (workspaces.length === 0) {
+    const ws = {
+      id: 'ws-' + genId(),
+      name: '默认',
+      session_ids: sessions.map((s) => s.id),
+      remembered_tabs: [],
+    };
+    workspaces.push(ws);
+    activeWorkspaceId = ws.id;
+    persistWorkspaces();
+    return;
+  }
+  if (!activeWorkspaceId || !workspaces.find((w) => w.id === activeWorkspaceId)) {
+    activeWorkspaceId = workspaces[0].id;
+  }
+}
+
+async function persistWorkspaces() {
+  try {
+    const res = await ipcRenderer.invoke('save-workspaces', {
+      workspaces,
+      active_workspace_id: activeWorkspaceId,
+    });
+    if (!res || !res.ok) notify(`Workspace save failed: ${res && res.error}`, 'error');
+  } catch (err) {
+    notify(`Workspace save failed: ${err.message}`, 'error');
+  }
+}
+
+function getActiveWorkspace() {
+  return workspaces.find((w) => w.id === activeWorkspaceId) || null;
+}
+
+function sessionInActiveWorkspace(sessionId) {
+  const ws = getActiveWorkspace();
+  if (!ws) return true;
+  return (ws.session_ids || []).includes(sessionId);
+}
+
+// Save a snapshot of currently-alive tabs in workspace `wsId` so a later
+// switch/restart can rehydrate them. Non-persistent tabs will re-spawn fresh;
+// persistent (tmux) tabs will reattach to the existing tmux session.
+function snapshotWorkspaceTabs(wsId) {
+  if (suspendSnapshot) return;
+  const ws = workspaces.find((w) => w.id === wsId);
+  if (!ws) return;
+  ws.remembered_tabs = tabs
+    .filter((t) => t.workspaceId === wsId && t.alive)
+    .map((t) => {
+      const snap = { sessionId: t.sessionId };
+      if (t.workingDirOverride) snap.workingDirOverride = t.workingDirOverride;
+      return snap;
+    });
+  persistWorkspaces();
+}
+
+function updateWorkspaceButton() {
+  const ws = getActiveWorkspace();
+  const el = $('#ws-current-name');
+  if (el) el.textContent = ws ? ws.name : '默认';
+}
+
+// ============================================================================
 // Session list rendering
 // ============================================================================
 
@@ -191,7 +290,20 @@ function renderSessionList() {
     return;
   }
 
-  for (const s of sessions) {
+  const ws = getActiveWorkspace();
+  const visible = ws
+    ? sessions.filter((s) => (ws.session_ids || []).includes(s.id))
+    : sessions;
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'padding: 16px; text-align: center; color: var(--fg-dim); font-size: 12px; line-height:1.6;';
+    empty.innerHTML = '本工作区还没有会话。<br/>点击上方的“工作区”菜单里的<br/>“添加会话到工作区…”';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const s of visible) {
     const card = document.createElement('div');
     card.className = 'session-card';
     if (s.id === selectedSessionId) card.classList.add('selected');
@@ -317,13 +429,19 @@ function attachSessionDragHandlers(el, sessionId) {
 function showSessionContextMenu(x, y, session) {
   const menu = $('#context-menu');
   menu.innerHTML = '';
+  const ws = getActiveWorkspace();
   const items = [
     { label: 'Launch', action: () => launchSession(session.id) },
     { label: 'Edit', action: () => openEditor(session.id) },
     { label: 'Clone', action: () => cloneSession(session.id) },
     { sep: true },
+    ws
+      ? { label: `从工作区“${ws.name}”移除`, action: () => removeSessionFromActiveWorkspace(session.id) }
+      : null,
+    { label: '加入其他工作区…', action: () => openAddToWorkspaceMenu(session.id, x, y) },
+    { sep: true },
     { label: 'Delete', danger: true, action: () => deleteSession(session.id) },
-  ];
+  ].filter(Boolean);
   for (const item of items) {
     if (item.sep) {
       const s = document.createElement('div');
@@ -433,6 +551,11 @@ function saveEditor(e) {
     const newSession = { id: genId(), ...payload };
     sessions.push(newSession);
     selectedSessionId = newSession.id;
+    const ws = getActiveWorkspace();
+    if (ws) {
+      ws.session_ids = [...(ws.session_ids || []), newSession.id];
+      persistWorkspaces();
+    }
   }
 
   persistSessions();
@@ -447,6 +570,11 @@ function cloneSession(sessionId) {
   const copy = { ...s, id: genId(), name: `${s.name} (copy)` };
   sessions.push(copy);
   selectedSessionId = copy.id;
+  const ws = getActiveWorkspace();
+  if (ws) {
+    ws.session_ids = [...(ws.session_ids || []), copy.id];
+    persistWorkspaces();
+  }
   persistSessions();
   renderSessionList();
 }
@@ -457,6 +585,17 @@ function deleteSession(sessionId) {
   if (!confirm(`Delete session "${s.name}"?`)) return;
   sessions = sessions.filter((x) => x.id !== sessionId);
   if (selectedSessionId === sessionId) selectedSessionId = null;
+  // Also purge from every workspace's session_ids and remembered_tabs.
+  let touched = false;
+  for (const ws of workspaces) {
+    const before = (ws.session_ids || []).length;
+    ws.session_ids = (ws.session_ids || []).filter((id) => id !== sessionId);
+    if (ws.session_ids.length !== before) touched = true;
+    const beforeR = (ws.remembered_tabs || []).length;
+    ws.remembered_tabs = (ws.remembered_tabs || []).filter((r) => r.sessionId !== sessionId);
+    if (ws.remembered_tabs.length !== beforeR) touched = true;
+  }
+  if (touched) persistWorkspaces();
   persistSessions();
   renderSessionList();
 }
@@ -541,6 +680,8 @@ function launchSession(sessionId, opts) {
     id: tabId,
     sessionId,
     sessionName: displayName,
+    workspaceId: activeWorkspaceId,
+    workingDirOverride: overrideDir || null,
     term,
     fitAddon,
     searchAddon,
@@ -569,6 +710,7 @@ function launchSession(sessionId, opts) {
   renderTabs();
   switchToTab(tabId);
   renderSessionList();
+  snapshotWorkspaceTabs(activeWorkspaceId);
 }
 
 function switchToTab(tabId) {
@@ -586,7 +728,7 @@ function switchToTab(tabId) {
       tab.term.focus();
     } catch (_) {}
   }
-  $('#welcome').classList.toggle('hidden', tabs.length > 0);
+  $('#welcome').classList.toggle('hidden', tabsInActiveWorkspace().length > 0);
   renderTabs();
 }
 
@@ -595,25 +737,36 @@ function closeTab(tabId) {
   if (idx < 0) return;
   if (activeTabId === tabId && window.TerminalSearch) window.TerminalSearch.close();
   const tab = tabs[idx];
+  const wsId = tab.workspaceId;
   if (tab.alive) ipcRenderer.invoke('kill-terminal', tabId);
   try { tab.term.dispose(); } catch (_) {}
   try { tab.container.remove(); } catch (_) {}
   tabs.splice(idx, 1);
 
   if (activeTabId === tabId) {
-    const next = tabs[idx] || tabs[idx - 1] || null;
+    // Only look for the "next" tab within the same workspace.
+    const wsTabs = tabs.filter((t) => t.workspaceId === wsId);
+    const next = wsTabs[0] || null;
     activeTabId = next ? next.id : null;
     if (next) switchToTab(next.id);
   }
-  $('#welcome').classList.toggle('hidden', tabs.length > 0);
+  $('#welcome').classList.toggle('hidden', tabsInActiveWorkspace().length > 0);
   renderTabs();
   renderSessionList();
+  snapshotWorkspaceTabs(wsId);
+}
+
+function tabsInActiveWorkspace() {
+  return tabs.filter((t) => t.workspaceId === activeWorkspaceId);
 }
 
 function renderTabs() {
   const el = $('#tabs');
   el.innerHTML = '';
+  // Only render tabs belonging to the active workspace; the others still
+  // exist (their PTY is running) but are hidden.
   for (const t of tabs) {
+    if (t.workspaceId !== activeWorkspaceId) continue;
     const div = document.createElement('div');
     div.className = 'tab' + (t.id === activeTabId ? ' active' : '') + (t.alive ? '' : ' dead');
     div.draggable = true;
@@ -937,9 +1090,10 @@ document.addEventListener('keydown', (e) => {
 
   if (e.ctrlKey && !e.shiftKey && e.code === 'Tab') {
     e.preventDefault();
-    if (tabs.length <= 1) return;
-    const idx = tabs.findIndex((t) => t.id === activeTabId);
-    const next = tabs[(idx + 1) % tabs.length];
+    const wsTabs = tabsInActiveWorkspace();
+    if (wsTabs.length <= 1) return;
+    const idx = wsTabs.findIndex((t) => t.id === activeTabId);
+    const next = wsTabs[(idx + 1) % wsTabs.length];
     if (next) switchToTab(next.id);
     return;
   }
@@ -1322,5 +1476,267 @@ if (window.TerminalSearch) {
   });
 }
 
+// ============================================================================
+// Workspace switching + management menu
+// ============================================================================
+
+async function switchWorkspace(wsId) {
+  if (wsId === activeWorkspaceId) return;
+  // Snapshot the workspace we're leaving so its tab list survives a restart.
+  snapshotWorkspaceTabs(activeWorkspaceId);
+
+  activeWorkspaceId = wsId;
+  persistWorkspaces();
+
+  // Close terminal-search bar if open (its state is tied to the previous tab).
+  if (window.TerminalSearch) window.TerminalSearch.close();
+
+  // Pick a tab from the new workspace to focus. If there are alive tabs, use
+  // the first one; otherwise activeTabId becomes null and welcome shows.
+  const wsTabs = tabsInActiveWorkspace();
+  activeTabId = wsTabs[0] ? wsTabs[0].id : null;
+  for (const t of tabs) {
+    t.container.classList.toggle('active', t.id === activeTabId);
+  }
+  if (activeTabId) {
+    const t = tabs.find((x) => x.id === activeTabId);
+    try {
+      t.fitAddon.fit();
+      if (t.alive) ipcRenderer.send('terminal-resize', t.id, t.term.cols, t.term.rows);
+      t.term.focus();
+    } catch (_) {}
+  }
+  $('#welcome').classList.toggle('hidden', wsTabs.length > 0);
+
+  updateWorkspaceButton();
+  renderTabs();
+  renderSessionList();
+
+  // Restore remembered tabs if this workspace has none live yet — this covers
+  // both "just reopened the app" and "first switch after startup".
+  if (wsTabs.length === 0) restoreRememberedTabs(wsId);
+}
+
+async function restoreRememberedTabs(wsId) {
+  const ws = workspaces.find((w) => w.id === wsId);
+  if (!ws || !Array.isArray(ws.remembered_tabs) || ws.remembered_tabs.length === 0) return;
+  suspendSnapshot = true;
+  try {
+    for (const r of ws.remembered_tabs) {
+      if (!r || !r.sessionId) continue;
+      if (!sessions.find((s) => s.id === r.sessionId)) continue;
+      launchSession(r.sessionId, r.workingDirOverride
+        ? { workingDirOverride: r.workingDirOverride }
+        : undefined);
+    }
+  } finally {
+    suspendSnapshot = false;
+  }
+}
+
+async function newWorkspace() {
+  const name = await inAppPrompt('新工作区名称', '', { placeholder: '例如 cmb-wealth' });
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const ws = {
+    id: 'ws-' + genId(),
+    name: trimmed,
+    session_ids: [],
+    remembered_tabs: [],
+  };
+  workspaces.push(ws);
+  persistWorkspaces();
+  await switchWorkspace(ws.id);
+}
+
+async function renameWorkspace(wsId) {
+  const ws = workspaces.find((w) => w.id === wsId);
+  if (!ws) return;
+  const name = await inAppPrompt('重命名工作区', ws.name || '');
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  ws.name = trimmed;
+  persistWorkspaces();
+  updateWorkspaceButton();
+}
+
+function deleteWorkspace(wsId) {
+  if (workspaces.length <= 1) { notify('至少要保留一个工作区', 'error'); return; }
+  const ws = workspaces.find((w) => w.id === wsId);
+  if (!ws) return;
+  if (!confirm(`删除工作区 "${ws.name}"?(其中的会话不会被删除,只是从这个工作区里移除)`)) return;
+  // Close all tabs belonging to this workspace first.
+  const doomed = tabs.filter((t) => t.workspaceId === wsId).map((t) => t.id);
+  for (const tid of doomed) closeTab(tid);
+  workspaces = workspaces.filter((w) => w.id !== wsId);
+  if (activeWorkspaceId === wsId) {
+    activeWorkspaceId = workspaces[0].id;
+    updateWorkspaceButton();
+    renderSessionList();
+    renderTabs();
+  }
+  persistWorkspaces();
+}
+
+function removeSessionFromActiveWorkspace(sessionId) {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  ws.session_ids = (ws.session_ids || []).filter((id) => id !== sessionId);
+  persistWorkspaces();
+  renderSessionList();
+}
+
+function openWorkspaceMenu(anchor) {
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'menu-header';
+  header.textContent = '切换工作区';
+  menu.appendChild(header);
+
+  for (const w of workspaces) {
+    const mi = document.createElement('div');
+    mi.className = 'menu-item checked' + (w.id === activeWorkspaceId ? '' : ' unchecked');
+    const count = (w.session_ids || []).length;
+    mi.textContent = `${w.name}  (${count})`;
+    mi.addEventListener('click', () => {
+      menu.classList.add('hidden');
+      switchWorkspace(w.id);
+    });
+    menu.appendChild(mi);
+  }
+
+  const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep);
+
+  const items = [
+    { label: '+ 新建工作区…', action: newWorkspace },
+    { label: '添加会话到工作区…', action: () => openAddSessionsToWorkspaceMenu() },
+    { label: '重命名当前工作区…', action: () => renameWorkspace(activeWorkspaceId) },
+    { label: '删除当前工作区', danger: true, action: () => deleteWorkspace(activeWorkspaceId) },
+  ];
+  for (const item of items) {
+    const mi = document.createElement('div');
+    mi.className = 'menu-item' + (item.danger ? ' danger' : '');
+    mi.textContent = item.label;
+    mi.addEventListener('click', () => { menu.classList.add('hidden'); item.action(); });
+    menu.appendChild(mi);
+  }
+
+  menu.classList.remove('hidden');
+  const rect = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let left = rect.left;
+  if (left + mw > window.innerWidth - 4) left = window.innerWidth - mw - 4;
+  let top = rect.bottom + 2;
+  if (top + mh > window.innerHeight - 4) top = rect.top - mh - 2;
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+// Multi-select checklist: which sessions belong to the current workspace.
+function openAddSessionsToWorkspaceMenu() {
+  const ws = getActiveWorkspace();
+  if (!ws) return;
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'menu-header';
+  header.textContent = `工作区“${ws.name}”包含的会话`;
+  menu.appendChild(header);
+
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'menu-item dim';
+    empty.textContent = '还没有任何会话,先建一个';
+    menu.appendChild(empty);
+  }
+
+  for (const s of sessions) {
+    const inWs = (ws.session_ids || []).includes(s.id);
+    const mi = document.createElement('div');
+    mi.className = 'menu-item checked' + (inWs ? '' : ' unchecked');
+    mi.textContent = s.name;
+    mi.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (inWs) {
+        ws.session_ids = (ws.session_ids || []).filter((id) => id !== s.id);
+      } else {
+        ws.session_ids = [...(ws.session_ids || []), s.id];
+      }
+      persistWorkspaces();
+      renderSessionList();
+      openAddSessionsToWorkspaceMenu();
+    });
+    menu.appendChild(mi);
+  }
+
+  const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep);
+  const done = document.createElement('div');
+  done.className = 'menu-item';
+  done.textContent = '完成';
+  done.addEventListener('click', () => menu.classList.add('hidden'));
+  menu.appendChild(done);
+
+  menu.classList.remove('hidden');
+  const anchor = $('#btn-workspace');
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = rect.left + 'px';
+  menu.style.top = (rect.bottom + 2) + 'px';
+}
+
+function openAddToWorkspaceMenu(sessionId, x, y) {
+  const menu = $('#context-menu');
+  menu.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'menu-header';
+  header.textContent = '加入 / 移出工作区';
+  menu.appendChild(header);
+
+  for (const w of workspaces) {
+    const inWs = (w.session_ids || []).includes(sessionId);
+    const mi = document.createElement('div');
+    mi.className = 'menu-item checked' + (inWs ? '' : ' unchecked');
+    mi.textContent = w.name;
+    mi.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (inWs) {
+        w.session_ids = (w.session_ids || []).filter((id) => id !== sessionId);
+      } else {
+        w.session_ids = [...(w.session_ids || []), sessionId];
+      }
+      persistWorkspaces();
+      renderSessionList();
+      openAddToWorkspaceMenu(sessionId, x, y);
+    });
+    menu.appendChild(mi);
+  }
+
+  menu.classList.remove('hidden');
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+}
+
+const btnWs = $('#btn-workspace');
+if (btnWs) {
+  btnWs.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openWorkspaceMenu(btnWs);
+  });
+}
+
+// ============================================================================
 // Initial load
-loadSessionsFromDisk();
+// ============================================================================
+
+(async function init() {
+  await loadSessionsFromDisk();
+  await loadWorkspacesFromDisk();
+  updateWorkspaceButton();
+  renderSessionList();
+  // Restore tabs remembered for the active workspace from last session.
+  restoreRememberedTabs(activeWorkspaceId);
+})();

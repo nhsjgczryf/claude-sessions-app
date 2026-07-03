@@ -8,6 +8,8 @@ const {
   shellQuote,
   loadSessions,
   saveSessions,
+  loadWorkspaces,
+  saveWorkspaces,
   parsePortForwards,
   buildLocalCommand,
   scpUpload,
@@ -431,6 +433,17 @@ ipcMain.handle('load-sessions', () => loadSessions());
 ipcMain.handle('save-sessions', (_evt, sessions) => {
   try {
     saveSessions(sessions || []);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('load-workspaces', () => loadWorkspaces());
+
+ipcMain.handle('save-workspaces', (_evt, payload) => {
+  try {
+    saveWorkspaces(payload || {});
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };

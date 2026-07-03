@@ -155,6 +155,47 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
   border-color: var(--border);
 }
 
+.workspace-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-btn:hover { border-color: var(--accent); }
+.workspace-btn .ws-label { color: var(--fg-dim); }
+.workspace-btn .ws-current {
+  flex: 1;
+  color: var(--fg);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-btn .ws-caret { color: var(--fg-dim); font-size: 10px; }
+
+.menu-item.checked::before {
+  content: '✓ ';
+  color: var(--accent);
+  font-weight: 600;
+}
+.menu-item.checked.unchecked::before {
+  content: '  ';
+}
+.menu-header {
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+
 .sidebar-actions {
   display: flex;
   gap: 6px;
