@@ -180,29 +180,6 @@ input[type=text]:focus, textarea:focus { border-color: var(--accent); }
 }
 .workspace-btn .ws-caret { color: var(--fg-dim); font-size: 10px; }
 
-.scope-toggle {
-  display: flex;
-  gap: 2px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px;
-}
-.scope-pill {
-  flex: 1;
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 3px 8px;
-  font-size: 11px;
-  color: var(--fg-dim);
-  border-radius: 3px;
-}
-.scope-pill:hover { background: var(--bg-hover); color: var(--fg); }
-.scope-pill.active {
-  background: var(--bg-selected);
-  color: var(--fg);
-}
-
 .session-card.foreign {
   opacity: 0.55;
 }

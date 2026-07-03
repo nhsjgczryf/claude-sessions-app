@@ -51,9 +51,11 @@ let tabCounter = 0;
 // ids + a remembered tab layout). See docs at the top of loadWorkspacesFromDisk.
 let workspaces = [];
 let activeWorkspaceId = null;
-// Sidebar scope: 'current' shows only sessions in the active workspace,
-// 'all' shows everything with foreign cards dimmed + an inline "+加入" button.
-let sessionScope = 'current';
+// "全部" view: when true, both the sidebar and the tab bar drop the
+// workspace filter (side-by-side with every workspace's live tabs). Launching
+// a new tab in this mode still assigns it to activeWorkspaceId (the last-
+// selected real workspace), so toggling back off doesn't orphan anything.
+let viewAll = false;
 // While loading remembered tabs on startup / workspace switch, suppress the
 // per-launch snapshot save (we'd be overwriting the snapshot with itself).
 let suspendSnapshot = false;
@@ -145,7 +147,7 @@ function sessionInstanceCount(sessionId) {
 }
 
 const LS_LAST_LAUNCHED = 'claude-sessions.lastLaunchedId';
-const LS_SESSION_SCOPE = 'claude-sessions.sessionScope';
+const LS_VIEW_ALL = 'claude-sessions.viewAll';
 const LS_COLLAPSED_GROUPS = 'claude-sessions.collapsedGroups';
 
 // Set of sessionIds whose tab-group is currently collapsed in the tab bar.
@@ -298,7 +300,12 @@ function snapshotWorkspaceTabs(wsId) {
 function updateWorkspaceButton() {
   const ws = getActiveWorkspace();
   const el = $('#ws-current-name');
-  if (el) el.textContent = ws ? ws.name : '默认';
+  if (!el) return;
+  if (viewAll) {
+    el.textContent = `🌐 全部 · ${ws ? ws.name : ''}`;
+  } else {
+    el.textContent = ws ? ws.name : '默认';
+  }
 }
 
 // ============================================================================
@@ -319,21 +326,21 @@ function renderSessionList() {
 
   const ws = getActiveWorkspace();
   const memberIds = new Set((ws && ws.session_ids) || []);
-  const visible = sessionScope === 'all'
+  const visible = viewAll
     ? sessions
     : sessions.filter((s) => memberIds.has(s.id));
 
   if (visible.length === 0) {
     const empty = document.createElement('div');
     empty.style.cssText = 'padding: 16px; text-align: center; color: var(--fg-dim); font-size: 12px; line-height:1.6;';
-    empty.innerHTML = '本工作区还没有会话。<br/>点上方"全部"看所有会话,<br/>或"工作区"菜单里勾选加入。';
+    empty.innerHTML = '本工作区还没有会话。<br/>点顶部工作区按钮 → "全部"<br/>可以看所有会话并选择加入。';
     list.appendChild(empty);
     return;
   }
 
   for (const s of visible) {
     const inWs = memberIds.has(s.id);
-    const foreign = sessionScope === 'all' && !inWs;
+    const foreign = viewAll && !inWs;
 
     const card = document.createElement('div');
     card.className = 'session-card' + (foreign ? ' foreign' : '');
@@ -347,7 +354,7 @@ function renderSessionList() {
     const memberOf = workspaces
       .filter((w) => (w.session_ids || []).includes(s.id))
       .map((w) => w.name);
-    const badgesHtml = (sessionScope === 'all' && memberOf.length)
+    const badgesHtml = (viewAll && memberOf.length)
       ? `<span class="ws-badges" title="属于工作区: ${escapeHtml(memberOf.join(', '))}">📁 ${escapeHtml(memberOf.join(' · '))}</span>`
       : '';
 
@@ -800,6 +807,8 @@ function closeTab(tabId) {
 }
 
 function tabsInActiveWorkspace() {
+  // In "全部" view the tab bar shows every tab regardless of workspace.
+  if (viewAll) return tabs.slice();
   return tabs.filter((t) => t.workspaceId === activeWorkspaceId);
 }
 
@@ -812,12 +821,12 @@ function renderTabs() {
   const el = $('#tabs');
   el.innerHTML = '';
 
-  // Group active-workspace tabs by sessionId. Group order = order of the
-  // first tab of that session in the `tabs` array, so drag-reorders still
-  // control how groups line up.
+  // Group active-workspace tabs (or all tabs in 全部 view) by sessionId.
+  // Group order = order of the first tab of that session in the `tabs`
+  // array, so drag-reorders still control how groups line up.
   const groupsBySession = new Map();
   for (const t of tabs) {
-    if (t.workspaceId !== activeWorkspaceId) continue;
+    if (!viewAll && t.workspaceId !== activeWorkspaceId) continue;
     if (!groupsBySession.has(t.sessionId)) groupsBySession.set(t.sessionId, []);
     groupsBySession.get(t.sessionId).push(t);
   }
@@ -1654,7 +1663,18 @@ if (window.TerminalSearch) {
 // ============================================================================
 
 async function switchWorkspace(wsId) {
-  if (wsId === activeWorkspaceId) return;
+  // Clicking a real workspace always drops the "全部" filter — user picked a
+  // specific target, they want the focused view again.
+  if (viewAll) {
+    viewAll = false;
+    try { localStorage.setItem(LS_VIEW_ALL, '0'); } catch (_) {}
+  }
+  if (wsId === activeWorkspaceId) {
+    updateWorkspaceButton();
+    renderSessionList();
+    renderTabs();
+    return;
+  }
   // Snapshot the workspace we're leaving so its tab list survives a restart.
   snapshotWorkspaceTabs(activeWorkspaceId);
 
@@ -1771,15 +1791,13 @@ function addSessionToActiveWorkspace(sessionId) {
   notify(`已加入工作区 "${ws.name}"`, 'success');
 }
 
-function setSessionScope(scope) {
-  if (scope !== 'current' && scope !== 'all') return;
-  sessionScope = scope;
-  try { localStorage.setItem(LS_SESSION_SCOPE, scope); } catch (_) {}
-  const cur = $('#scope-current');
-  const all = $('#scope-all');
-  if (cur) cur.classList.toggle('active', scope === 'current');
-  if (all) all.classList.toggle('active', scope === 'all');
+function setViewAll(on) {
+  viewAll = !!on;
+  try { localStorage.setItem(LS_VIEW_ALL, viewAll ? '1' : '0'); } catch (_) {}
+  updateWorkspaceButton();
   renderSessionList();
+  renderTabs();
+  $('#welcome').classList.toggle('hidden', tabsInActiveWorkspace().length > 0);
 }
 
 function openWorkspaceMenu(anchor) {
@@ -1790,6 +1808,19 @@ function openWorkspaceMenu(anchor) {
   header.className = 'menu-header';
   header.textContent = '切换工作区';
   menu.appendChild(header);
+
+  // "全部" pseudo-entry — unfilters both sidebar + tab bar.
+  const allRow = document.createElement('div');
+  allRow.className = 'menu-item checked' + (viewAll ? '' : ' unchecked');
+  allRow.textContent = '🌐 全部(不过滤)';
+  allRow.title = '打开后侧栏和标签栏都显示所有工作区的内容';
+  allRow.addEventListener('click', () => {
+    menu.classList.add('hidden');
+    setViewAll(!viewAll);
+  });
+  menu.appendChild(allRow);
+
+  const sep0 = document.createElement('div'); sep0.className = 'menu-sep'; menu.appendChild(sep0);
 
   workspaces.forEach((w, idx) => {
     const row = document.createElement('div');
@@ -1895,10 +1926,6 @@ if (btnWs) {
   });
 }
 
-const scopeCur = $('#scope-current');
-const scopeAll = $('#scope-all');
-if (scopeCur) scopeCur.addEventListener('click', () => setSessionScope('current'));
-if (scopeAll) scopeAll.addEventListener('click', () => setSessionScope('all'));
 
 // ============================================================================
 // Running-tabs global panel (across workspaces + collapsed groups)
@@ -2036,14 +2063,11 @@ if (btnRunning) {
 // ============================================================================
 
 (async function init() {
-  try {
-    const s = localStorage.getItem(LS_SESSION_SCOPE);
-    if (s === 'all' || s === 'current') sessionScope = s;
-  } catch (_) {}
+  try { viewAll = localStorage.getItem(LS_VIEW_ALL) === '1'; } catch (_) {}
   await loadSessionsFromDisk();
   await loadWorkspacesFromDisk();
   updateWorkspaceButton();
-  setSessionScope(sessionScope);
+  renderSessionList();
   updateRunningCount();
   // Restore tabs remembered for the active workspace from last session.
   restoreRememberedTabs(activeWorkspaceId);
