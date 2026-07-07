@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,6 +12,7 @@ const {
   saveWorkspaces,
   parsePortForwards,
   buildLocalCommand,
+  withClaudeResume,
   scpUpload,
   saveImageToTemp,
 } = require('./lib/session-runtime');
@@ -98,7 +99,12 @@ function buildRemoteCmd(session, opts = {}) {
 
   if (hasClaude) {
     const claudeArgs = session.claude_args ? ` ${session.claude_args}` : '';
-    setupParts.push(`${session.claude_cmd.trim()}${claudeArgs}`);
+    const raw = `${session.claude_cmd.trim()}${claudeArgs}`;
+    // Persistent (tmux) sessions keep claude alive across reconnects on their
+    // own, so only non-persistent ones need session-id/resume injection.
+    setupParts.push(
+      persistent ? raw : withClaudeResume(raw, session._claude_session_id, session._resume)
+    );
   }
 
   let remoteCmd;
@@ -144,9 +150,12 @@ function buildRemoteCmd(session, opts = {}) {
 // and the PTY never exits.
 function buildSshArgs(session, opts = {}) {
   const args = ['-t'];
-  // Surface a dead network as an ssh exit within ~90s instead of hanging on
-  // TCP timeout — required for the auto-reconnect path to ever fire.
-  args.push('-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3');
+  // Surface a dead network as an ssh exit within ~45s (3×15s) instead of
+  // hanging on TCP timeout — required for the auto-reconnect path to ever fire.
+  // ConnectTimeout keeps each reconnect attempt snappy when the network is
+  // still down (fail in 10s rather than blocking on the OS TCP timeout).
+  args.push('-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3');
+  args.push('-o', 'ConnectTimeout=10');
   for (const spec of parsePortForwards(session.port_forwards)) {
     args.push('-L', spec);
   }
@@ -155,14 +164,18 @@ function buildSshArgs(session, opts = {}) {
   return args;
 }
 
-// Auto-reconnect tuning. We only retry persistent ssh sessions, because
-// non-persistent ones lose all in-flight work on the remote side anyway —
-// silently re-attaching would lie about state. Bail out if the previous
-// attempt died too quickly (likely a config error, not a network blip) or
-// if we've already retried too many times in a row.
+// Auto-reconnect tuning. We retry any ssh session (persistent or not): a
+// persistent one reattaches to its tmux with all state intact, while a
+// non-persistent one re-runs its command — and for claude that now means
+// `--resume`, so the conversation comes back too (withClaudeResume). Bail out
+// only if the previous attempt died too quickly (likely a config error, not a
+// network blip) or if we've retried too many times *in a row* — a connection
+// that stayed up past RECONNECT_STABLE_MS resets that budget, so a long-lived
+// session reconnects indefinitely instead of giving up after N lifetime drops.
 const RECONNECT_MIN_UPTIME_MS = 5000;
 const RECONNECT_MAX_RETRIES = 5;
 const RECONNECT_DELAY_MS = 1500;
+const RECONNECT_STABLE_MS = 60000;
 
 // Build the env vars that point a locally-spawned process at our SSH SOCKS
 // bridge. We set both upper- and lower-case forms because the Node and
@@ -258,13 +271,18 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
     // ignore it.
     if (!current || current.pty !== term) return;
 
+    const uptime = Date.now() - current.lastStartAt;
+    // A connection that stayed up past RECONNECT_STABLE_MS was healthy — treat
+    // a later drop as a fresh blip and reset the retry budget, so the N-in-a-row
+    // cap only trips on genuine reconnect thrash.
+    const effectiveRetries = uptime >= RECONNECT_STABLE_MS ? 0 : current.retries;
+
     const shouldReconnect =
       !current.userClosed &&
       session.type === 'ssh' &&
-      session.persistent &&
       session.ssh_host &&
-      Date.now() - current.lastStartAt >= RECONNECT_MIN_UPTIME_MS &&
-      current.retries < RECONNECT_MAX_RETRIES;
+      uptime >= RECONNECT_MIN_UPTIME_MS &&
+      effectiveRetries < RECONNECT_MAX_RETRIES;
 
     if (!shouldReconnect) {
       // Tunnel (if any) belonged to the dead PTY's env — release before we
@@ -289,7 +307,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
       return;
     }
 
-    const attempt = current.retries + 1;
+    const attempt = effectiveRetries + 1;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(
         'terminal-data',
@@ -301,9 +319,13 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
     setTimeout(async () => {
       const stillThere = terminals.get(tabId);
       if (!stillThere || stillThere.pty !== term || stillThere.userClosed) return;
+      // Reconnect ⇒ the previous claude died; resume its conversation by id.
+      // No-op for persistent (tmux reattach) / non-claude — withClaudeResume
+      // ignores those. Carried forward in newEntry so further drops keep it.
+      const resumedSession = { ...session, _resume: true };
       try {
         const { pty: newTerm, releaseTunnel } = await spawnPtyForTab(
-          tabId, session, cols, rows, tmuxName
+          tabId, resumedSession, cols, rows, tmuxName
         );
         // Window/tab may have been closed while we awaited the tunnel —
         // drop the freshly-spawned PTY if so to avoid an orphan.
@@ -315,7 +337,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
         }
         const newEntry = {
           pty: newTerm,
-          session,
+          session: resumedSession,
           tmuxName,
           releaseTunnel,
           lastStartAt: Date.now(),
@@ -324,7 +346,7 @@ function attachPtyHandlers(tabId, entry, cols, rows) {
         };
         terminals.set(tabId, newEntry);
         attachPtyHandlers(tabId, newEntry, cols, rows);
-        sendStartupCommand(newTerm, session);
+        sendStartupCommand(newTerm, resumedSession);
       } catch (err) {
         console.error('[reconnect] failed to respawn pty:', err);
         // Same fall-through as the !shouldReconnect branch above: keep the
@@ -468,12 +490,16 @@ ipcMain.handle('reconnect-terminal', async (_evt, tabId, cols, rows) => {
     return { ok: false, error: 'no exited terminal for this tab' };
   }
   try {
+    // A reconnect means the previous claude died — resume its conversation by
+    // id rather than starting fresh. No-op for persistent/non-claude tabs
+    // (withClaudeResume ignores them).
+    const session = { ...entry.session, _resume: true };
     const { pty: newTerm, releaseTunnel } = await spawnPtyForTab(
-      tabId, entry.session, cols, rows, entry.tmuxName
+      tabId, session, cols, rows, entry.tmuxName
     );
     const newEntry = {
       pty: newTerm,
-      session: entry.session,
+      session,
       tmuxName: entry.tmuxName,
       releaseTunnel,
       lastStartAt: Date.now(),
@@ -482,7 +508,7 @@ ipcMain.handle('reconnect-terminal', async (_evt, tabId, cols, rows) => {
     };
     terminals.set(tabId, newEntry);
     attachPtyHandlers(tabId, newEntry, cols, rows);
-    sendStartupCommand(newTerm, entry.session);
+    sendStartupCommand(newTerm, session);
     return { ok: true };
   } catch (err) {
     console.error('[reconnect-terminal] failed:', err);
@@ -661,7 +687,34 @@ ipcMain.handle('list-dir', async (_evt, dirPath, sshHost) => {
   }
 });
 
-app.whenReady().then(createWindow);
+// Waking from sleep: any live ssh connection is almost certainly dead but may
+// not have hit its keepalive timeout yet. For persistent (tmux) sessions,
+// cycling is free — state lives server-side — so kill them now to trigger an
+// immediate reconnect instead of waiting ~45s. onExit's auto-reconnect handles
+// the respawn. Non-persistent live tabs are left to keepalive (cycling them
+// would throw away a shell that might still be alive). Parked tabs are
+// reconnected by the renderer via 'power-resume' (it knows each tab's size).
+function handleSystemResume() {
+  for (const [, entry] of terminals) {
+    if (
+      entry.pty &&
+      !entry.userClosed &&
+      entry.session &&
+      entry.session.type === 'ssh' &&
+      entry.session.persistent
+    ) {
+      try { entry.pty.kill(); } catch (_) {}
+    }
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('power-resume');
+  }
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  try { powerMonitor.on('resume', handleSystemResume); } catch (_) {}
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -73,6 +73,19 @@ function genId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// A real RFC-4122 uuid for claude's --session-id (which validates the format).
+// crypto.randomUUID always exists under Electron's nodeIntegration; the manual
+// fallback just guarantees launch never throws on this.
+function genUuid() {
+  try { return require('crypto').randomUUID(); }
+  catch (_) {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  }
+}
+
 function notify(message, type = 'info') {
   const el = document.createElement('div');
   el.className = `notification ${type}`;
@@ -292,6 +305,7 @@ function snapshotWorkspaceTabs(wsId) {
     .map((t) => {
       const snap = { sessionId: t.sessionId };
       if (t.workingDirOverride) snap.workingDirOverride = t.workingDirOverride;
+      if (t.claudeSessionId) snap.claudeSessionId = t.claudeSessionId;
       return snap;
     });
   persistWorkspaces();
@@ -662,6 +676,12 @@ function launchSession(sessionId, opts) {
     ? { ...baseSession, working_dir: overrideDir }
     : baseSession;
 
+  // Own a stable claude session id per tab so the conversation can be resumed
+  // after an app restart / reconnect. Reused from the remembered snapshot on
+  // restore (resume=true), freshly minted on a normal launch (resume=false).
+  const claudeSessionId = (opts && opts.claudeSessionId) || genUuid();
+  const resume = !!(opts && opts.resume);
+
   const tabId = `tab-${++tabCounter}`;
   const existing = sessionInstanceCount(sessionId);
   const baseName = existing === 0 ? baseSession.name : `${baseSession.name} #${existing + 1}`;
@@ -731,6 +751,7 @@ function launchSession(sessionId, opts) {
     sessionName: displayName,
     workspaceId: activeWorkspaceId,
     workingDirOverride: overrideDir || null,
+    claudeSessionId,
     term,
     fitAddon,
     searchAddon,
@@ -750,7 +771,10 @@ function launchSession(sessionId, opts) {
   attachKeyboardHandlers(tab);
 
   const { cols, rows } = term;
-  ipcRenderer.invoke('create-terminal', tabId, session, cols, rows).then((res) => {
+  // Spread into a fresh object so the runtime-only fields never leak back into
+  // the persisted session config (session may be baseSession by reference).
+  const launchSessionObj = { ...session, _claude_session_id: claudeSessionId, _resume: resume };
+  ipcRenderer.invoke('create-terminal', tabId, launchSessionObj, cols, rows).then((res) => {
     if (!res || !res.ok) {
       notify(`Failed to start: ${res && res.error}`, 'error');
     }
@@ -1204,46 +1228,78 @@ ipcRenderer.on('terminal-data', (_e, tabId, data) => {
   if (tab) tab.term.write(data);
 });
 
+// Install the "parked" key handler on an exited tab: R (re)tries the
+// reconnect, any other key closes. Re-armable, so a failed reconnect can leave
+// the tab parked for another R / wake / online-event retry.
+function armParkedKeys(tab) {
+  if (tab._exitKeyDisposable) { try { tab._exitKeyDisposable.dispose(); } catch (_) {} }
+  tab._exitKeyDisposable = tab.term.onKey(({ domEvent }) => {
+    if (domEvent && (domEvent.key === 'r' || domEvent.key === 'R')) {
+      doReconnect(tab, { auto: false });
+    } else {
+      try { tab._exitKeyDisposable.dispose(); } catch (_) {}
+      tab._exitKeyDisposable = null;
+      closeTab(tab.id);
+    }
+  });
+}
+
+// Reconnect a parked tab. Shared by the R key and the auto triggers (wake from
+// sleep / network back online). On failure the tab stays parked so a later
+// event can retry; auto retries stay quiet to avoid spamming the terminal.
+function doReconnect(tab, opts) {
+  opts = opts || {};
+  if (!tab || !tab._parked || tab._reconnecting) return;
+  tab._reconnecting = true;
+  if (tab._exitKeyDisposable) { try { tab._exitKeyDisposable.dispose(); } catch (_) {} tab._exitKeyDisposable = null; }
+  const cols = (tab.term && tab.term.cols) || 120;
+  const rows = (tab.term && tab.term.rows) || 30;
+  tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
+  ipcRenderer.invoke('reconnect-terminal', tab.id, cols, rows).then((res) => {
+    tab._reconnecting = false;
+    if (res && res.ok) {
+      tab._parked = false;
+      // Defer alive=true so this same keypress' onData (xterm may fire it AFTER
+      // onKey) sees alive=false and gets dropped — otherwise the literal 'r'
+      // slips into the new PTY's input.
+      setTimeout(() => {
+        tab.alive = true;
+        renderTabs();
+        renderSessionList();
+      }, 0);
+    } else {
+      if (!opts.auto) {
+        const msg = (res && res.error) || 'unknown error';
+        tab.term.write(`\r\n\x1b[31m[reconnect failed: ${msg}. Press R to retry, any other key to close.]\x1b[0m\r\n`);
+      }
+      armParkedKeys(tab);
+    }
+  });
+}
+
+// Fire the auto-reconnect for every currently-parked tab. Bound to the machine
+// waking from sleep (main → 'power-resume') and the network coming back.
+function reconnectParkedTabs() {
+  for (const tab of tabs) {
+    if (tab._parked && !tab._reconnecting) doReconnect(tab, { auto: true });
+  }
+}
+
 ipcRenderer.on('terminal-exit', (_e, tabId, exitCode) => {
   const tab = tabs.find((t) => t.id === tabId);
   if (!tab) return;
   tab.alive = false;
+  tab._parked = true;
   tab.term.write(
     `\r\n\x1b[33m[Session ended with code ${exitCode}. Press R to reconnect, any other key to close.]\x1b[0m\r\n`
   );
   renderTabs();
   renderSessionList();
-
-  const disposable = tab.term.onKey(({ domEvent }) => {
-    try { disposable.dispose(); } catch (_) {}
-    if (domEvent && (domEvent.key === 'r' || domEvent.key === 'R')) {
-      const cols = (tab.term && tab.term.cols) || 120;
-      const rows = (tab.term && tab.term.rows) || 30;
-      tab.term.write(`\x1b[33m[reconnecting…]\x1b[0m\r\n`);
-      ipcRenderer.invoke('reconnect-terminal', tabId, cols, rows).then((res) => {
-        if (res && res.ok) {
-          // Defer alive=true so this same keypress' onData (xterm may fire
-          // it AFTER onKey) sees alive=false and gets dropped — otherwise
-          // the literal 'r' slips into the new PTY's input.
-          setTimeout(() => {
-            tab.alive = true;
-            renderTabs();
-            renderSessionList();
-          }, 0);
-        } else {
-          const msg = (res && res.error) || 'unknown error';
-          tab.term.write(`\r\n\x1b[31m[reconnect failed: ${msg}. Press any key to close.]\x1b[0m\r\n`);
-          const d2 = tab.term.onKey(() => {
-            try { d2.dispose(); } catch (_) {}
-            closeTab(tabId);
-          });
-        }
-      });
-    } else {
-      closeTab(tabId);
-    }
-  });
+  armParkedKeys(tab);
 });
+
+window.addEventListener('online', reconnectParkedTabs);
+ipcRenderer.on('power-resume', reconnectParkedTabs);
 
 // ============================================================================
 // Global keyboard + buttons
@@ -1718,9 +1774,13 @@ async function restoreRememberedTabs(wsId) {
     for (const r of ws.remembered_tabs) {
       if (!r || !r.sessionId) continue;
       if (!sessions.find((s) => s.id === r.sessionId)) continue;
-      launchSession(r.sessionId, r.workingDirOverride
-        ? { workingDirOverride: r.workingDirOverride }
-        : undefined);
+      // Reattach to the same claude conversation (resume) when we remembered
+      // its id; older snapshots without one just start fresh.
+      launchSession(r.sessionId, {
+        workingDirOverride: r.workingDirOverride || undefined,
+        claudeSessionId: r.claudeSessionId || undefined,
+        resume: !!r.claudeSessionId,
+      });
     }
   } finally {
     suspendSnapshot = false;
