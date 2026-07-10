@@ -427,6 +427,13 @@ function createWindow() {
   });
 
   mainWindow.setMenu(null);
+  // setMenu(null) also removes the default DevTools accelerators — keep F12
+  // working so renderer diagnostics ([webgl]/[gpu]/[perf] logs) stay reachable.
+  mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      mainWindow.webContents.toggleDevTools();
+    }
+  });
   mainWindow.loadFile('index.html');
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -449,6 +456,13 @@ function createWindow() {
     terminals.clear();
   });
 }
+
+// GPU diagnostics for the renderer — distinguishes "WebGL blocked, xterm fell
+// back to the slow DOM renderer" from machine-level problems when a client
+// reports laggy typing/scrolling.
+ipcMain.handle('gpu-status', () => {
+  try { return app.getGPUFeatureStatus(); } catch (e) { return { error: e && e.message }; }
+});
 
 ipcMain.handle('load-sessions', () => loadSessions());
 

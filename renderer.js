@@ -87,13 +87,44 @@ function genUuid() {
   }
 }
 
-function notify(message, type = 'info') {
+function notify(message, type = 'info', ms = 3000) {
   const el = document.createElement('div');
   el.className = `notification ${type}`;
   el.textContent = message;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+  setTimeout(() => el.remove(), ms);
 }
+
+// One loud in-app warning per run when a terminal lands on the slow DOM
+// renderer. Console output alone isn't enough: the window has no menu, so
+// without the F12 handler (main.js) users can never see the [webgl] logs.
+let degradedRendererNotified = false;
+async function reportDegradedRenderer(reason) {
+  console.warn('[webgl] using DOM renderer (typing/scrolling will feel laggy):', reason);
+  if (degradedRendererNotified) return;
+  degradedRendererNotified = true;
+  try {
+    const gpu = await ipcRenderer.invoke('gpu-status');
+    console.warn('[gpu] feature status:', JSON.stringify(gpu, null, 2));
+  } catch (_) {}
+  notify('WebGL 不可用，终端已回落到慢速 DOM 渲染（输入/滚动会卡）。按 F12 看 [gpu] 诊断', 'error', 12000);
+}
+
+// Event-loop lag monitor: if the renderer main thread is saturated (e.g. many
+// background terminals parsing heavy output), typing and scrolling jank even
+// with a healthy GPU renderer. Sustained >200ms drift is the tell — check the
+// F12 console for these when diagnosing "everything feels sluggish".
+(function monitorEventLoopLag() {
+  let last = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const lag = now - last - 1000;
+    last = now;
+    if (lag > 200) {
+      console.warn(`[perf] renderer event-loop lag ${Math.round(lag)}ms — main thread saturated`);
+    }
+  }, 1000);
+})();
 
 // window.prompt() is disabled in Electron (returns null synchronously), so
 // anywhere we need a one-line text answer we use this in-app modal instead.
@@ -775,10 +806,10 @@ function launchSession(sessionId, opts) {
       term.loadAddon(webgl);
       console.info(`[webgl] renderer active for ${tabId}`);
     } catch (e) {
-      console.warn('[webgl] failed to load, using DOM renderer (typing will feel laggy):', e && e.message);
+      reportDegradedRenderer(e && e.message);
     }
   } else {
-    console.warn('[webgl] addon unavailable, using DOM renderer (typing will feel laggy)');
+    reportDegradedRenderer('addon not installed');
   }
 
   fitAddon.fit();
