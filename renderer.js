@@ -53,8 +53,9 @@ let workspaces = [];
 let activeWorkspaceId = null;
 // "全部" view: when true, both the sidebar and the tab bar drop the
 // workspace filter (side-by-side with every workspace's live tabs). Launching
-// a new tab in this mode still assigns it to activeWorkspaceId (the last-
-// selected real workspace), so toggling back off doesn't orphan anything.
+// a new tab in this mode assigns it to the workspace the user most plausibly
+// means (active tab's workspace when reusing its session, else a workspace
+// that contains the session) — see workspaceForNewTab.
 let viewAll = false;
 // While loading remembered tabs on startup / workspace switch, suppress the
 // per-launch snapshot save (we'd be overwriting the snapshot with itself).
@@ -157,6 +158,18 @@ function escapeHtml(s) {
 
 function sessionInstanceCount(sessionId) {
   return tabs.filter((t) => t.sessionId === sessionId).length;
+}
+
+// Smallest instance number (1-based) not taken by a live tab of this session.
+// Count-based numbering (`count + 1`) hands out duplicate "#2"s once tabs get
+// closed out of order or only part of the pool is restored after a restart.
+function nextInstanceNumber(sessionId) {
+  const used = new Set(
+    tabs.filter((t) => t.sessionId === sessionId).map((t) => t.instanceNum || 1)
+  );
+  let n = 1;
+  while (used.has(n)) n++;
+  return n;
 }
 
 const LS_LAST_LAUNCHED = 'claude-sessions.lastLaunchedId';
@@ -291,6 +304,25 @@ function sessionInActiveWorkspace(sessionId) {
   const ws = getActiveWorkspace();
   if (!ws) return true;
   return (ws.session_ids || []).includes(sessionId);
+}
+
+// Which workspace a freshly-launched tab should belong to. Outside "全部"
+// that's simply the active workspace. Inside "全部" the tab bar mixes every
+// workspace, so activeWorkspaceId (= last-selected) is often NOT what the
+// user is looking at — prefer, in order: the active tab's workspace when the
+// new tab reuses its session (the tab-bar "+" case), the active workspace if
+// it contains the session, else the first workspace that contains it.
+function workspaceForNewTab(sessionId) {
+  if (!viewAll) return activeWorkspaceId;
+  const active = tabs.find((t) => t.id === activeTabId);
+  if (active && active.sessionId === sessionId
+      && workspaces.some((w) => w.id === active.workspaceId)) {
+    return active.workspaceId;
+  }
+  const ws = getActiveWorkspace();
+  if (ws && (ws.session_ids || []).includes(sessionId)) return activeWorkspaceId;
+  const owner = workspaces.find((w) => (w.session_ids || []).includes(sessionId));
+  return owner ? owner.id : activeWorkspaceId;
 }
 
 // Save a snapshot of currently-alive tabs in workspace `wsId` so a later
@@ -683,8 +715,11 @@ function launchSession(sessionId, opts) {
   const resume = !!(opts && opts.resume);
 
   const tabId = `tab-${++tabCounter}`;
-  const existing = sessionInstanceCount(sessionId);
-  const baseName = existing === 0 ? baseSession.name : `${baseSession.name} #${existing + 1}`;
+  // Restore passes the target workspace explicitly (the one being rehydrated);
+  // interactive launches derive it from the current view.
+  const wsId = (opts && opts.workspaceId) || workspaceForNewTab(sessionId);
+  const instanceNum = nextInstanceNumber(sessionId);
+  const baseName = instanceNum === 1 ? baseSession.name : `${baseSession.name} #${instanceNum}`;
   const displayName = overrideDir ? `${baseName} · ${shortDir(overrideDir)}` : baseName;
 
   try { localStorage.setItem(LS_LAST_LAUNCHED, sessionId); } catch (_) {}
@@ -738,9 +773,12 @@ function launchSession(sessionId, opts) {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => { try { webgl.dispose(); } catch (_) {} });
       term.loadAddon(webgl);
+      console.info(`[webgl] renderer active for ${tabId}`);
     } catch (e) {
-      console.warn('[webgl] failed to load, using DOM renderer:', e && e.message);
+      console.warn('[webgl] failed to load, using DOM renderer (typing will feel laggy):', e && e.message);
     }
+  } else {
+    console.warn('[webgl] addon unavailable, using DOM renderer (typing will feel laggy)');
   }
 
   fitAddon.fit();
@@ -749,7 +787,8 @@ function launchSession(sessionId, opts) {
     id: tabId,
     sessionId,
     sessionName: displayName,
-    workspaceId: activeWorkspaceId,
+    instanceNum,
+    workspaceId: wsId,
     workingDirOverride: overrideDir || null,
     claudeSessionId,
     term,
@@ -783,7 +822,7 @@ function launchSession(sessionId, opts) {
   renderTabs();
   switchToTab(tabId);
   renderSessionList();
-  snapshotWorkspaceTabs(activeWorkspaceId);
+  snapshotWorkspaceTabs(wsId);
 }
 
 function switchToTab(tabId) {
@@ -1775,16 +1814,34 @@ async function restoreRememberedTabs(wsId) {
       if (!r || !r.sessionId) continue;
       if (!sessions.find((s) => s.id === r.sessionId)) continue;
       // Reattach to the same claude conversation (resume) when we remembered
-      // its id; older snapshots without one just start fresh.
+      // its id; older snapshots without one just start fresh. workspaceId is
+      // pinned to the workspace being rehydrated — never re-derived from the
+      // current view.
       launchSession(r.sessionId, {
         workingDirOverride: r.workingDirOverride || undefined,
         claudeSessionId: r.claudeSessionId || undefined,
         resume: !!r.claudeSessionId,
+        workspaceId: wsId,
       });
     }
   } finally {
     suspendSnapshot = false;
   }
+}
+
+// In "全部" view the tab bar claims to show every workspace's tabs, so lazily
+// restoring only the active workspace (the normal per-switch behavior) leaves
+// phantom gaps: remembered tabs of other workspaces simply don't exist until
+// you visit each one. Rehydrate every workspace that has no live tabs yet.
+async function restoreAllRememberedTabs() {
+  for (const w of workspaces) {
+    if (tabs.some((t) => t.workspaceId === w.id)) continue;
+    await restoreRememberedTabs(w.id);
+  }
+  // Every launch stole focus, so the last-restored workspace's tab ended up
+  // active — hand focus back to a tab of the active workspace.
+  const own = tabs.find((t) => t.workspaceId === activeWorkspaceId);
+  if (own && activeTabId !== own.id) switchToTab(own.id);
 }
 
 async function newWorkspace() {
@@ -1858,6 +1915,7 @@ function setViewAll(on) {
   renderSessionList();
   renderTabs();
   $('#welcome').classList.toggle('hidden', tabsInActiveWorkspace().length > 0);
+  if (viewAll) restoreAllRememberedTabs();
 }
 
 function openWorkspaceMenu(anchor) {
@@ -2129,6 +2187,9 @@ if (btnRunning) {
   updateWorkspaceButton();
   renderSessionList();
   updateRunningCount();
-  // Restore tabs remembered for the active workspace from last session.
-  restoreRememberedTabs(activeWorkspaceId);
+  // Restore tabs remembered from last session — just the active workspace
+  // normally (others rehydrate lazily on switch), all of them in "全部" view
+  // since that view is supposed to show everything.
+  if (viewAll) restoreAllRememberedTabs();
+  else restoreRememberedTabs(activeWorkspaceId);
 })();
