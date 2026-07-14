@@ -126,6 +126,13 @@ async function reportDegradedRenderer(reason) {
   }, 1000);
 })();
 
+// Chromium's default action for a file dropped outside an explicit drop
+// target (session cards / tabs handle their own) is to NAVIGATE the window
+// to that file, replacing the app. Swallow drops globally; the element-level
+// reorder handlers still run first on their own targets.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
 // window.prompt() is disabled in Electron (returns null synchronously), so
 // anywhere we need a one-line text answer we use this in-app modal instead.
 // Resolves to the entered string, or null if the user cancels.

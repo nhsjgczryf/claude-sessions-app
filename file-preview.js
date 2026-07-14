@@ -187,7 +187,12 @@
     bodyEl.querySelectorAll('a[href]').forEach((a) => {
       a.addEventListener('click', (ev) => {
         const href = a.getAttribute('href') || '';
-        if (/^https?:/i.test(href)) { ev.preventDefault(); openExternal(href); }
+        if (href.startsWith('#')) return;   // in-document anchors are harmless
+        // Everything else must be intercepted: a relative href would navigate
+        // the WHOLE window/tab away from the app (the preview shares the
+        // app's document). http(s) goes to the system browser, rest is inert.
+        ev.preventDefault();
+        if (/^https?:/i.test(href)) openExternal(href);
       });
     });
   }

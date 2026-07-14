@@ -443,6 +443,20 @@ function createWindow() {
     return { action: 'deny' };
   });
 
+  // setWindowOpenHandler only covers window.open — it does NOT stop the
+  // window itself from navigating. A file dropped on the window or a
+  // relative <a> in previewed markdown replaces the whole UI with the
+  // target file (blank dark window titled after it). Allow reloads of the
+  // app page, bounce http(s) to the system browser, swallow the rest.
+  const appPage = require('url').pathToFileURL(path.join(__dirname, 'index.html')).href;
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === appPage) return;
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) {
+      require('electron').shell.openExternal(url).catch(() => {});
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
     for (const [, entry] of terminals) {

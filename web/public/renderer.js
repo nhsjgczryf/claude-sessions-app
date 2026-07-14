@@ -35,6 +35,13 @@ const LS_COLLAPSED = 'claude-sessions.sidebarCollapsed';
 // drops so reattach replays buffered output and resumes input.
 const LS_TABS = 'claude-sessions.tabs';
 
+// The browser's default action for a file dropped outside an explicit drop
+// target (session cards / tabs handle their own) is to NAVIGATE the tab to
+// that file, replacing the app. Swallow drops globally; the element-level
+// reorder handlers still run first on their own targets.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
 let ws = null;
 let sessions = [];
 let selectedSessionId = null;
